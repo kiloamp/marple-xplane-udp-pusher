@@ -11,7 +11,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from xplane_live import (Flight, Receiver, SIGNALS, FLIGHT_METADATA, CHALLENGE_PREFIX,
-                         LandingCut, AltitudeReset, next_remote_number, reserve_challenge_name)
+                         LandingCut, AltitudeReset, next_remote_number, reserve_challenge_name,
+                         LANDING_END_REASON, LANDING_TAIL_SECONDS, command_packet, pause_simulator)
 from xplane_aircraft import aircraft_mode, identity_key
 
 ACROBATIC_PREFIX = "Marple_Acrobatic_"
@@ -22,10 +23,6 @@ def alert_packet(message):
     if len(lines)>4 or any(len(s.encode('utf-8'))>239 for s in lines):
         raise ValueError('ALRT accepts four lines of at most 239 UTF-8 bytes')
     return b'ALRT\0'+struct.pack('<240s240s240s240s',*[s.encode() for s in (lines+['']*4)[:4]])
-
-
-def command_packet(command):
-    return b'CMND\0'+command.encode('ascii')+b'\0'
 
 
 class SessionTimer:
@@ -113,7 +110,7 @@ class SessionController:
         self.session_manifest={'state':'CAPTURING','name':self.worker.name,
             'dataset_id':self.worker.flight.manifest.get('dataset_id'),
             'mode':self.mode,'aircraft':self.aircraft,
-            'timer':'15 seconds after first gear compression' if self.mode=='landing' else '60 wall-clock seconds',
+            'timer':LANDING_END_REASON if self.mode=='landing' else '60 wall-clock seconds',
             'start_monotonic':now}
         if self.mode!='landing':self.session_manifest['cutoff_monotonic']=now+self.duration
         self.save_session()
@@ -159,7 +156,7 @@ class SessionController:
     def stop(self,now,reason='operator stop',pause=False):
         if reason=='operator stop':
             self.landing_cycle=False;self.requested_start=False;self.reset_pending=False
-        if self.mode=='landing':pause=False
+        if self.mode=='landing' and reason!=LANDING_END_REASON:pause=False
         if self.state in {'WAIT_ID','WAIT_RESET'}:
             self.state='READY';self.message='Stopped. Press S to start again.'
         if self.state=='RECORDING':
@@ -168,12 +165,12 @@ class SessionController:
             self.session_manifest.update(state='LOCAL_CAPTURE_COMPLETE',end_reason=reason,capture_complete=True)
             self.save_session()
             if pause:
-                paused=self.fresh('paused',now)
-                if paused==0:
-                    self.receiver.sock.sendto(command_packet('sim/operation/pause_toggle'),self.receiver.target)
-                    self.pause_sent=now;self.log('Pause requested; awaiting telemetry confirmation.')
-                elif paused==1:self.pause_confirmed=True
-                else:self.log('Pause not sent: no fresh pause state. Pause X-Plane manually.')
+                outcome=pause_simulator(self.receiver,self.fresh('paused',now),self.log)
+                self.session_manifest['pause_request']=outcome
+                if outcome=='requested':self.pause_sent=now
+                elif outcome=='already_paused':
+                    self.pause_confirmed=True;self.session_manifest['pause_confirmed']=True
+                self.save_session()
             self.worker.finish(reason)
         elif self.state in {'WAITING','COUNTDOWN'}:
             if self.worker:
@@ -192,9 +189,9 @@ class SessionController:
                 previous=self.landing.touchdown;self.landing.observe(mono,values)
                 if previous is None and self.landing.touchdown is not None:
                     self.reset_watch.landed=True
-                    self.session_manifest.update(touchdown_time_ns=timestamp,cutoff_time_ns=timestamp+15_000_000_000)
-                    self.save_session();self.log('First gear compression: recording 15 more seconds.')
-                if self.landing.expired(mono):self.stop(mono,'15 seconds after first gear compression')
+                    self.session_manifest.update(touchdown_time_ns=timestamp,cutoff_time_ns=timestamp+int(self.landing.tail*1e9))
+                    self.save_session();self.log(f'First gear compression: recording {self.landing.tail:g} more seconds, then pausing.')
+                if self.landing.expired(mono):self.stop(mono,LANDING_END_REASON,pause=True)
         in_window=(self.mode=='landing' or (self.timer.started is not None and mono<self.timer.started+self.duration))
         if self.state=='RECORDING' and self.timer.started<=mono and in_window:
             # Separate journal remains authoritative even if the cloud worker fails.
@@ -228,7 +225,7 @@ class SessionController:
                     self.begin_recording(now)
         if self.state=='RECORDING':
             if self.mode=='landing':
-                if self.landing.expired(now):self.stop(now,'15 seconds after first gear compression')
+                if self.landing.expired(now):self.stop(now,LANDING_END_REASON,pause=True)
             else:
                 for event in self.timer.tick(now):
                     if event=='warning':self.send_alert('10 seconds to go')
@@ -250,7 +247,7 @@ class SessionController:
         flight=self.worker.flight if self.worker else None
         return {'state':self.state,'connected':self.connected(now),'signals':len(self.seen),
                 'mode':self.mode or 'detecting','aircraft':(self.aircraft or {}).get('description','Waiting for UDP identity'),
-                'remaining':(max(0,self.landing.touchdown+15-now) if self.landing.touchdown is not None else 15) if self.mode=='landing' else self.timer.remaining(now),'countdown':max(0,(self.countdown_until or now)-now),
+                'remaining':(max(0,self.landing.touchdown+self.landing.tail-now) if self.landing.touchdown is not None else self.landing.tail) if self.mode=='landing' else self.timer.remaining(now),'countdown':max(0,(self.countdown_until or now)-now),
                 'dataset':flight.manifest['name'] if flight else '—',
                 'uploaded':flight.manifest.get('confirmed_uploaded_packets',0) if flight else 0,
                 'queue':self.worker.jobs.qsize() if self.worker else 0,
@@ -288,7 +285,7 @@ def draw_console(screen,controller):
     while not controller.closed:
         status=controller.snapshot(time.monotonic());screen.erase();height,width=screen.getmaxyx()
         filled=int(30*(1-status['remaining']/controller.duration))
-        bar=(' Waiting for touchdown; 15-second tail after first compression.' if status['mode']=='landing' else ' ['+'#'*filled+'-'*(30-filled)+']')
+        bar=(f' Waiting for touchdown; {LANDING_TAIL_SECONDS:g}-second tail, then pause.' if status['mode']=='landing' else ' ['+'#'*filled+'-'*(30-filled)+']')
         lines=['FLIGHT SESSION RECORDER','='*min(72,max(0,width-1)),
                f" {status['state']}    X-Plane: {'CONNECTED' if status['connected'] else 'WAITING'}",
                f" Signals seen: {status['signals']}    Send pacing: >=1.05s after response",
@@ -301,7 +298,7 @@ def draw_console(screen,controller):
                ' LOCAL CAPTURE ONLY — live upload failed; recovery runs at session end.' if status['cloud_failed'] else '',
                '', ' [S] Start recording & pushing data   [X] Stop & save   [Q] Quit safely','',
                ' Recent activity:',*[' '+line for line in status['events']], '',
-               (' Landing mode: automatic 3,000-ft reset cycle; no automatic pause.' if status['mode']=='landing' else ' Timer: 60 wall-clock seconds. Dismiss X-Plane alerts promptly.')]
+               (' Landing mode: pause at cutoff; reset to 3,000 ft and unpause for next flight.' if status['mode']=='landing' else ' Timer: 60 wall-clock seconds. Dismiss X-Plane alerts promptly.')]
         for row,line in enumerate(lines[:max(0,height-1)]):
             style=curses.A_BOLD if row in [0,2] else 0
             if curses.has_colors():

@@ -10,13 +10,17 @@ an acrobatic session. The console shows the detected aircraft and selected mode.
 
 | Detected aircraft | Flow | A/C Model | Dataset names |
 | --- | --- | --- | --- |
-| ToLiss Airbus | Automatic landing capture, first compression +15 seconds, then wait for a reset to 3000 ft MSL | Airbus A320 | A320_Landing_Challenge_NNN |
+| ToLiss Airbus | Automatic landing capture, first compression +5 seconds, pause, then wait for a reset to 3000 ft MSL and unpause | Airbus A320 | A320_Landing_Challenge_NNN |
 | Any other aircraft | Operator-started 5-second countdown, 60-second flight, warning, pause, finalize | Marple Acrobatic | Marple_Acrobatic_NNN |
 
 ToLiss is matched by its brand in the author/description, or the installed aircraft's
 `Gliding Kiwi` author plus an Airbus ICAO code. The installed A319 identifies itself
 this way; it retains the user-requested **Airbus A320** metadata label for the challenge.
 ICAO A320 alone does not incorrectly classify other vendors as ToLiss.
+
+At the landing cutoff, the pause request is sent before waiting for cloud uploads
+and finalization. In the default console this is independent of upload latency.
+Operator stop/quit, resets and aircraft changes do not request a landing pause.
 
 Both modes use the existing `X-Plane Fair Live` stream, separated by dataset names and
 metadata. Their counters are independent. Departure Airport remains LEPA and Flight
@@ -112,8 +116,8 @@ Marple Insight browser rendering or simulator FPS.
 
 ## Original landing behavior
 
-Run `python3 start_xplane_service.py --landing-mode` for the original 15-second
-post-compression cutoff and automatic 3000-foot reset watcher.
+Run `python3 start_xplane_service.py --landing-mode` for the legacy console. It also
+uses the 5-second post-compression cutoff, UDP pause request and 3000-foot reset watcher.
 The historical setup and validation details below apply to that mode.
 
 # Legacy landing mode and previous flight validation
@@ -145,7 +149,8 @@ X-Plane's built-in RREF and DATA UDP interfaces. Existing FlyWithLua scripts can
 2. Start X-Plane yourself and load the A320 at LEPA. Either startup order works:
    the launcher waits for telemetry if the simulator is not yet ready.
 3. Keep the Terminal window open while flying. The recorder captures the landing,
-   ends 15 seconds after initial gear compression, and waits for your reset to 3,000 ft.
+   ends 5 seconds after initial gear compression, requests a pause, and waits for your
+   reset to 3,000 ft. Unpause after resetting to begin the next flight.
 4. To stop, press **Ctrl+C** in that Terminal and wait for finalization to complete.
 
 The launcher runs one instance at a time and loads this project's existing `.env.local`.
@@ -177,13 +182,18 @@ must be able to reach the recorder. On this Mac, use the loopback address above.
    unpaused/non-replay status. Initial runway compression does not trigger it.
 3. The first measured compression above **0.1 mm** on any gear latches touchdown.
    This small threshold excludes numeric noise; verify it with the chosen aircraft.
-4. End **15 wall-clock seconds** after that first compression. Bounces do not restart
+4. End **5 wall-clock seconds** after that first compression and request a pause
+   using UDP `CMND sim/operation/pause_toggle` (the normal P-key pause action). Bounces do not restart
    the countdown. At 10 Hz, touchdown detection is limited by approximately 0.1-second
-   sampling plus UDP/network delay. The tail also expires if the sim is paused.
+   sampling plus UDP/network delay. The tail also expires if the sim is paused; no toggle is sent if fresh telemetry
+   says it is already paused. Missing/stale pause state or a send failure is logged
+   for manual pausing, while recording still stops. The default console checks
+   subsequent pause telemetry and does not blindly retry the toggle.
 5. In continuous mode, discard intervening samples from flight datasets while waiting
    for the next simulator reset. Raw UDP packets continue to be journaled locally.
 6. After landing, an altitude jump of at least 1,000 ft arms a three-second reset
-   window. An airborne sample within **3,000 +/-150 ft MSL** starts the next dataset.
+   window. An airborne sample within **3,000 +/-150 ft MSL** arms the next flight;
+   the default console waits for fresh unpaused telemetry before recording.
    This accommodates an actual observed reset: a transient 22,720-ft packet followed
    by 3,035 ft. A gradual climb through 3,000 ft does not trigger it. Set another target
    with `--reset-altitude-ft`. If resetting before the landing tail completes, the old
@@ -317,8 +327,8 @@ Sources:
 - https://developer.x-plane.com/article/preconfigured-autopilots-and-other-autopilot-changes-in-11-30/
 
 Start as before by double-clicking `Start A320 Landing Challenge.command`. Stop with
-Ctrl+C and wait for finalization. The 15-second first-compression cutoff, 3000-ft
-reset watcher, numbering and flight metadata are unchanged.
+Ctrl+C and wait for finalization. The current first-compression cutoff is 5 seconds
+with a pause request; the 3000-ft reset watcher, numbering and metadata still apply.
 
 Expanded-capture validation on 2026-09-22 UTC: flight 004 (dataset 1169)
 received 454 additional channels from 2,992 inspection packets, totaling 1,358,368
@@ -332,6 +342,6 @@ Bulk recovery avoids issuing hundreds of individual signal-poll requests.
 
 Aircraft-routing validation: 43 automated tests pass, covering both profiles,
 fragmented/out-of-order identity packets, missing/stale identity, metadata forwarding,
-landing cutoff/reset, no timed pause for ToLiss, and switching aircraft without
+landing cutoff/reset, no 60-second timer for ToLiss, and switching aircraft without
 relabeling the previous capture. The console was smoke tested while X-Plane was
 closed. Live aircraft identity and ALRT/pause presentation still need simulator validation.

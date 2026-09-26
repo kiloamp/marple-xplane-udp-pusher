@@ -1,9 +1,9 @@
-"""Read-only X-Plane RREF telemetry capture, optionally streamed to Marple.
+"""X-Plane RREF telemetry capture, optionally streamed to Marple.
 
 Protocol: X-Plane 11/Instructions/X-Plane SPECS from Austin/
 Exchanging Data with X-Plane.rtfd. Units: Resources/plugins/DataRefs.txt.
-No aircraft controls or simulator reset commands are sent. The DATA UDP destination
-is configured to this receiver; the operator selects output groups in X-Plane.
+Landing completion requests a pause over UDP; no simulator reset commands are sent.
+The DATA destination is configured to this receiver; the operator selects output groups.
 """
 from __future__ import annotations
 
@@ -31,6 +31,28 @@ FLIGHT_METADATA = {
     "Flight Type": "Simulator Session",
 }
 CHALLENGE_PREFIX = "A320_Landing_Challenge_"
+LANDING_TAIL_SECONDS = 5.0
+LANDING_END_REASON = f"{LANDING_TAIL_SECONDS:g} seconds after first gear compression"
+
+
+def command_packet(command):
+    return b"CMND\0" + command.encode("ascii") + b"\0"
+
+
+def pause_simulator(receiver, paused, log=print):
+    """Toggle once only when the caller has fresh, unpaused telemetry."""
+    if paused == 1:
+        return "already_paused"
+    if paused != 0:
+        log("Pause not sent: no fresh pause state. Pause X-Plane manually.", flush=True)
+        return "unavailable"
+    try:
+        receiver.sock.sendto(command_packet("sim/operation/pause_toggle"), receiver.target)
+    except OSError:
+        log("Pause request failed. Pause X-Plane manually; recording has stopped.", flush=True)
+        return "failed"
+    log("Pause requested; awaiting telemetry confirmation.", flush=True)
+    return "requested"
 
 
 def next_remote_number(datasets, prefix=CHALLENGE_PREFIX):
@@ -84,12 +106,12 @@ SIGNALS += [(f"gear_{i}_compression_m", f"sim/flightmodel2/gear/tire_vertical_de
 class LandingCut:
     """Arm after observed flight; latch FIRST compression, including a bounced landing.
 
-    Uses receiver monotonic seconds, so the tail is 15 wall-clock seconds.
+    Uses receiver monotonic seconds, so the default tail is 5 wall-clock seconds.
     A 0.1 mm threshold excludes floating-point noise; no landing debounce shifts
     the touchdown instant. Missing/old airborne or pause samples cannot arm it.
     """
 
-    def __init__(self, tail=15.0):
+    def __init__(self, tail=LANDING_TAIL_SECONDS):
         self.tail = tail
         self.latest = {}
         self.airborne_since = None
@@ -384,7 +406,7 @@ def main():
     parser.add_argument("--live", action="store_true", help="Create a Marple dataset and append real telemetry")
     parser.add_argument("--stream", default="X-Plane Fair Live")
     parser.add_argument("--auto-reset", action="store_true", help="Experimental: split when flight timer goes backwards by >1s")
-    parser.add_argument("--landing", action="store_true", help="End 15 seconds after first gear compression following observed airborne flight")
+    parser.add_argument("--landing", action="store_true", help="End and request a pause 5 seconds after first gear compression following observed airborne flight")
     parser.add_argument("--continuous", action="store_true", help="After landing end, wait for reset to 3000 ft MSL before starting a new dataset; requires --landing --seconds 0")
     parser.add_argument("--reset-altitude-ft", type=float, default=3000, help="MSL reset target; watcher uses +/-150 ft tolerance and >=1000 ft jump after landing")
     parser.add_argument("--wait-for-reset", action="store_true", help="Start in landed/waiting state; use when attaching after a completed landing")
@@ -417,6 +439,7 @@ def main():
     number = 0
     first = None
     previous_timer = None
+    latest_pause = (None, -math.inf)
     started = time.monotonic()
     last_status = started
     reason = "duration"
@@ -440,7 +463,9 @@ def main():
                 if first is not None and args.seconds and time.monotonic() - first >= args.seconds:
                     break
                 if flight and args.landing and landing.expired(time.monotonic()):
-                    flight.finish("15 seconds after first gear compression")
+                    paused, at = latest_pause
+                    pause_simulator(receiver, paused if time.monotonic() - at < 1 else None)
+                    flight.finish(LANDING_END_REASON)
                     flight = None
                     if not args.continuous:
                         break
@@ -451,6 +476,8 @@ def main():
                 continue
             if first is None:
                 first = mono
+            if "paused" in values:
+                latest_pause = (values["paused"], mono)
             if args.seconds and mono - first >= args.seconds:
                 break
             timer = values.get("flight_time_s")
@@ -472,7 +499,9 @@ def main():
             if waiting_reset:
                 continue
             if args.landing and flight and landing.expired(mono):
-                flight.finish("15 seconds after first gear compression")
+                paused, at = latest_pause
+                pause_simulator(receiver, paused if time.monotonic() - at < 1 else None)
+                flight.finish(LANDING_END_REASON)
                 flight = None
                 if not args.continuous:
                     break
@@ -492,9 +521,9 @@ def main():
                 if landing.touchdown is not None and previous_touchdown is None:
                     altitude_reset.landed = True
                     flight.manifest["touchdown_time_ns"] = timestamp
-                    flight.manifest["cutoff_time_ns"] = timestamp + 15_000_000_000
+                    flight.manifest["cutoff_time_ns"] = timestamp + int(landing.tail * 1e9)
                     flight.save()
-                    print("FIRST GEAR COMPRESSION: recording 15 more seconds, then ending this flight.", flush=True)
+                    print(f"FIRST GEAR COMPRESSION: recording {landing.tail:g} more seconds, then pausing and ending this flight.", flush=True)
             if time.monotonic() - flight.last_flush >= args.flush_seconds:
                 flight.flush()
             if time.monotonic() - last_status >= 5:

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock,patch
 from xplane_aircraft import AircraftIdentity, FIELDS, REQUESTS, aircraft_mode, packets
 from xplane_session import SessionController
-from xplane_live import Flight
+from xplane_live import Flight, command_packet
 
 TOLISS={'icao':'A319','author':'Gliding Kiwi','description':'A319 with high fidelity system modelling'}
 OTHER={'icao':'C172','author':'Laminar Research','description':'Cessna Skyhawk'}
@@ -68,19 +68,63 @@ class RoutingTests(unittest.TestCase):
     def test_waits_for_identity_instead_of_mislabelling(self):
         c=self.controller;c.commands.put('start');self.feed(100);c.tick(100)
         self.assertIsNone(c.worker);self.assertEqual(c.state,'WAIT_ID')
-    def test_toliss_landing_cut_reset_and_no_timed_pause(self):
+    def test_toliss_pauses_at_five_second_cutoff_then_waits_for_reset_and_unpause(self):
         c=self.controller;self.receiver.identity.snapshot.return_value=TOLISS
         self.feed(100);c.tick(100)
         self.assertEqual(c.state,'RECORDING');self.assertEqual(c.mode,'landing')
         self.assertEqual(c.worker.metadata['A/C Model'],'Airbus A320')
         self.assertEqual(c.worker.name,'A320_Landing_Challenge_001')
         self.feed(100.1);self.feed(101.2);self.feed(102,ground=1,compression=.1,alt=3)
-        c.tick(116.99);self.assertEqual(c.state,'RECORDING')
-        old=c.worker;c.tick(117);self.assertEqual(c.state,'WAIT_RESET')
-        self.assertEqual(old.reason,'15 seconds after first gear compression')
+        self.feed(106.99,ground=1,compression=.1,alt=3)
+        c.tick(106.99);self.assertEqual(c.state,'RECORDING')
+        self.assertAlmostEqual(c.snapshot(106.99)['remaining'],.01)
+        self.assertEqual(c.session_manifest['cutoff_time_ns'],107_000_000_000)
         self.receiver.sock.sendto.assert_not_called()
-        self.feed(118,ground=1,alt=3);self.feed(119);c.tick(119);c.tick(119.01)
+        old=c.worker;c.tick(107);self.assertEqual(c.state,'WAIT_RESET')
+        self.assertEqual(old.reason,'5 seconds after first gear compression')
+        self.receiver.sock.sendto.assert_called_once_with(command_packet('sim/operation/pause_toggle'),self.receiver.target)
+        c.feed(107_100_000_000,107.1,{'paused':1});c.tick(107.1)
+        self.assertTrue(c.pause_confirmed)
+        # Reset while paused must wait for the operator to unpause before recording.
+        c.feed(108_000_000_000,108,{'paused':1,'on_ground':0,'replay':0,'altitude_msl_m':914.4})
+        c.tick(108);c.tick(108.1);self.assertEqual(c.state,'WAITING')
+        self.feed(109);c.tick(109)
         self.assertEqual(c.state,'RECORDING');self.assertEqual(c.worker.name,'A320_Landing_Challenge_002')
+        self.receiver.sock.sendto.assert_called_once()
+
+    def start_landed_capture(self):
+        c=self.controller;self.receiver.identity.snapshot.return_value=TOLISS
+        self.feed(100);c.tick(100)
+        self.feed(100.1);self.feed(101.2);self.feed(102,ground=1,compression=.1,alt=3)
+        return c
+
+    def test_landing_feed_at_cutoff_pauses_once_and_excludes_boundary_sample(self):
+        c=self.start_landed_capture()
+        old=c.worker;count=old.jobs.qsize()
+        self.feed(107,ground=1,compression=.1,alt=3);c.tick(107);c.tick(107.1)
+        self.assertEqual(old.jobs.qsize(),count)
+        self.assertEqual(old.reason,'5 seconds after first gear compression')
+        self.receiver.sock.sendto.assert_called_once_with(command_packet('sim/operation/pause_toggle'),self.receiver.target)
+
+    def test_landing_cutoff_does_not_unpause_already_paused_simulator(self):
+        c=self.start_landed_capture()
+        c.feed(106_900_000_000,106.9,{'paused':1});c.tick(107)
+        self.assertEqual(c.state,'WAIT_RESET');self.assertTrue(c.pause_confirmed)
+        self.receiver.sock.sendto.assert_not_called()
+
+    def test_landing_cutoff_still_saves_if_pause_state_is_stale(self):
+        c=self.start_landed_capture();c.tick(107)
+        self.assertEqual(c.state,'WAIT_RESET')
+        self.assertEqual(c.session_manifest['pause_request'],'unavailable')
+        self.receiver.sock.sendto.assert_not_called()
+
+    def test_landing_pause_and_cutoff_do_not_wait_for_cloud_worker(self):
+        c=self.start_landed_capture();old=c.worker
+        old.finish=MagicMock()
+        self.feed(106.9,ground=1,compression=.1,alt=3);c.tick(107);c.tick(107.1)
+        self.assertEqual(c.state,'SAVING')
+        old.finish.assert_called_once_with('5 seconds after first gear compression')
+        self.receiver.sock.sendto.assert_called_once_with(command_packet('sim/operation/pause_toggle'),self.receiver.target)
     def test_landing_is_not_cut_at_sixty_seconds(self):
         c=self.controller;self.receiver.identity.snapshot.return_value=TOLISS
         self.feed(100);c.tick(100);self.feed(161);c.tick(161)
@@ -108,6 +152,7 @@ class RoutingTests(unittest.TestCase):
         c=self.controller;self.receiver.identity.snapshot.return_value=TOLISS
         self.feed(100);c.tick(100);c.commands.put('stop');c.tick(101);c.tick(102)
         self.assertEqual(c.state,'COMPLETE');self.assertFalse(c.landing_cycle)
+        self.receiver.sock.sendto.assert_not_called()
     def test_flight_forwards_profile_metadata_to_marple(self):
         stream=MagicMock();stream.add_dataset.return_value.id=1
         metadata={'A/C Model':'Marple Acrobatic','Departure Airport':'LEPA','Flight Type':'Simulator Session'}

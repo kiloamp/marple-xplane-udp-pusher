@@ -1,4 +1,5 @@
 import json
+import queue
 import struct
 import tempfile
 import unittest
@@ -6,7 +7,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from xplane_live import (AltitudeReset, Flight, LandingCut, SIGNALS, FLIGHT_METADATA,
-                         decode, reset_detected, subscription, next_remote_number, reserve_challenge_name)
+                         decode, reset_detected, subscription, next_remote_number, reserve_challenge_name,
+                         pause_simulator, main)
 
 
 class NamingTests(unittest.TestCase):
@@ -87,8 +89,8 @@ class LandingTests(unittest.TestCase):
         cut.observe(4, self.sample())
         cut.observe(6, self.sample(ground=1, compression=0.1))
         self.assertEqual(cut.touchdown, 3)
-        self.assertFalse(cut.expired(17.99))
-        self.assertTrue(cut.expired(18))
+        self.assertFalse(cut.expired(7.99))
+        self.assertTrue(cut.expired(8))
 
     def test_paused_replay_and_missing_status_do_not_arm(self):
         for sample in [{"on_ground": 0}, self.sample(paused=1), self.sample(replay=1)]:
@@ -106,6 +108,46 @@ class LandingTests(unittest.TestCase):
 
 
 class PacketTests(unittest.TestCase):
+    def test_pause_command_only_toggles_running_simulator(self):
+        receiver = MagicMock(); receiver.target = ('127.0.0.1', 49000)
+        log = MagicMock()
+        self.assertEqual(pause_simulator(receiver, 1, log), 'already_paused')
+        self.assertEqual(pause_simulator(receiver, None, log), 'unavailable')
+        receiver.sock.sendto.assert_not_called()
+        self.assertEqual(pause_simulator(receiver, 0, log), 'requested')
+        receiver.sock.sendto.assert_called_once_with(
+            b'CMND\0sim/operation/pause_toggle\0', receiver.target)
+
+    def test_pause_send_failure_does_not_block_saving(self):
+        receiver = MagicMock(); receiver.sock.sendto.side_effect = OSError('offline')
+        self.assertEqual(pause_simulator(receiver, 0, MagicMock()), 'failed')
+
+    def test_legacy_landing_pauses_before_finish_on_packet_or_timer_cutoff(self):
+        for timer_cutoff in (False, True):
+            with self.subTest(timer_cutoff=timer_cutoff), tempfile.TemporaryDirectory() as folder:
+                receiver = MagicMock(); receiver.failure = None; receiver.target = ('127.0.0.1', 49000)
+                samples = []
+                for now, ground, compression in [(0, 0, 0), (1.1, 0, 0), (2, 1, .1), (6.9, 1, .1)]:
+                    samples.append((int(now*1e9), now, {'paused': 0, 'replay': 0, 'on_ground': ground,
+                                                       'gear_0_compression_m': compression}))
+                samples.append(queue.Empty() if timer_cutoff else (7_000_000_000, 7, {'paused': 0}))
+                receiver.events.get.side_effect = samples
+                flight = MagicMock(); flight.last_flush = 7; flight.manifest = {}
+                order = []
+                receiver.sock.sendto.side_effect = lambda *a: order.append('pause')
+                flight.finish.side_effect = lambda *a: order.append('finish')
+                with patch('sys.argv', ['xplane_live.py', '--landing', '--seconds', '0']), \
+                     patch('xplane_live.Path', side_effect=lambda p: Path(folder)/p), \
+                     patch('xplane_live.Receiver', return_value=receiver), \
+                     patch('xplane_live.Flight', return_value=flight), \
+                     patch('xplane_live.time.monotonic', return_value=7), patch('builtins.print'):
+                    main()
+                self.assertEqual(order, ['pause', 'finish'])
+                self.assertEqual(flight.add.call_count, 4)
+                self.assertEqual(flight.manifest['cutoff_time_ns'], 7_000_000_000)
+                flight.finish.assert_called_once_with('5 seconds after first gear compression')
+                receiver.sock.sendto.assert_called_once_with(b'CMND\0sim/operation/pause_toggle\0', receiver.target)
+
     def test_decode_multiple_signals_ignores_unknown_and_nonfinite(self):
         packet = b"RREF\0" + b"".join(struct.pack("<if", i, v) for i, v in [(0, 123.5), (3, 91), (900, 2), (4, float("nan"))])
         self.assertEqual(decode(packet), {"flight_time_s": 123.5, "airspeed_kias": 91})

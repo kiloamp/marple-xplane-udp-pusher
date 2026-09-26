@@ -8,7 +8,7 @@ live uploads, and finalizes and verifies each completed dataset.
 
 | Aircraft | Recording flow | Dataset name |
 | --- | --- | --- |
-| ToLiss Airbus | Automatic recording; ends 15 seconds after first landing-gear compression; resets to a new dataset at 3000 ft | `A320_Landing_Challenge_XXX` |
+| ToLiss Airbus | Automatic recording; ends and requests a pause 5 seconds after first landing-gear compression; reset to 3000 ft and unpause for a new dataset | `A320_Landing_Challenge_XXX` |
 | Any other aircraft | Press S; 5-second preparation; 60-second flight; warning at 10 seconds remaining; pause request and finalize | `Marple_Acrobatic_XXX` |
 
 Both modes use the `X-Plane Fair Live` datastream. The console shows aircraft,
