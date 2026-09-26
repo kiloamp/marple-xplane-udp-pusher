@@ -86,9 +86,12 @@ class RoutingTests(unittest.TestCase):
         c.feed(107_100_000_000,107.1,{'paused':1});c.tick(107.1)
         self.assertTrue(c.pause_confirmed)
         # Reset while paused must wait for the operator to unpause before recording.
-        c.feed(108_000_000_000,108,{'paused':1,'on_ground':0,'replay':0,'altitude_msl_m':914.4})
-        c.tick(108);c.tick(108.1);self.assertEqual(c.state,'WAITING')
-        self.feed(109);c.tick(109)
+        c.feed(108_000_000_000,108,{'paused':1,'on_ground':1,'replay':0,'altitude_msl_m':6925})
+        c.feed(111_000_000_000,111,{'altitude_msl_m':914.4})
+        c.feed(111_100_000_000,111.1,{'paused':1,'on_ground':0,'replay':0})
+        c.tick(111.1);c.tick(111.2);self.assertEqual(c.state,'WAITING')
+        self.assertIn('3,000 ft reset detected',c.message)
+        self.feed(112);c.tick(112)
         self.assertEqual(c.state,'RECORDING');self.assertEqual(c.worker.name,'A320_Landing_Challenge_002')
         self.receiver.sock.sendto.assert_called_once()
 

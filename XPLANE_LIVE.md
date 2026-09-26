@@ -133,8 +133,10 @@ No toggle is sent when already paused or pause state is stale. The main console
 checks subsequent telemetry for confirmation and never blindly retries. Failed or
 unconfirmed pauses are logged for manual action; recording still stops.
 
-After a landing, an upward altitude jump of at least 1000 ft arms a three-second
-reset window. An airborne sample at 3000 ±150 ft MSL marks the next flight ready;
+After a landing, an upward altitude jump of at least 1000 ft arms a 15-second
+reset window so situation loading and delayed ground-contact updates can settle.
+Fresh altitude, airborne and non-replay signals may arrive in separate packets.
+An airborne sample at 3000 ±150 ft MSL marks the next flight ready and is logged;
 the main console waits for fresh unpaused telemetry. Reset and unpause manually.
 An aircraft change ends the old capture before applying new metadata. X/Q and
 resets do not trigger the landing pause command.

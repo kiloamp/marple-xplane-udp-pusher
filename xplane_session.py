@@ -192,6 +192,7 @@ class SessionController:
         if self.mode=='landing' and self.aircraft is not None:
             if self.reset_watch.observe(values,mono):
                 self.reset_pending=True
+                self.log('3,000 ft reset detected. Next landing capture starts when saving finishes and X-Plane is unpaused.')
                 if self.state=='RECORDING':self.stop(mono,'reset before landing cutoff')
             if self.state=='RECORDING':
                 previous=self.landing.touchdown;self.landing.observe(mono,values)
@@ -257,6 +258,7 @@ class SessionController:
                 self.state='WAIT_RESET';self.message='Flight saved. Waiting for reset to 3,000 ft MSL.'
         if self.state=='WAIT_RESET' and self.reset_pending and not self.exit_requested:
             self.start(now)
+            self.message='3,000 ft reset detected. Waiting for live, unpaused telemetry…'
         if self.pause_sent is not None and not self.pause_confirmed and now-self.pause_sent>3:
             self.log('Pause not confirmed. Pause the simulator manually; recording has already stopped.')
             self.pause_sent=None

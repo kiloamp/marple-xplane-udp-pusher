@@ -35,7 +35,7 @@ class AltitudeResetTests(unittest.TestCase):
         watch = AltitudeReset()
         watch.landed = True
         self.assertFalse(watch.observe({"altitude_msl_m": 10}))
-        self.assertTrue(watch.observe({"altitude_msl_m": 914.4, "on_ground": 0}))
+        self.assertTrue(watch.observe({"altitude_msl_m": 914.4, "on_ground": 0, "replay": 0}))
         self.assertFalse(watch.observe({"altitude_msl_m": 914.4}))
 
     def test_no_reset_before_landing_or_during_gradual_climb(self):
@@ -59,14 +59,42 @@ class AltitudeResetTests(unittest.TestCase):
         watch.landed = True
         watch.observe({"altitude_msl_m": 3.637, "on_ground": 1}, 0)
         self.assertFalse(watch.observe({"altitude_msl_m": 6925.174, "on_ground": 1}, 0.165))
-        self.assertTrue(watch.observe({"altitude_msl_m": 925.1004, "on_ground": 0}, 0.320))
+        self.assertTrue(watch.observe({"altitude_msl_m": 925.1004, "on_ground": 0, "replay": 0}, 0.320))
 
     def test_expired_transient_is_not_a_reset(self):
         watch = AltitudeReset()
         watch.landed = True
         watch.observe({"altitude_msl_m": 3, "on_ground": 1}, 0)
         watch.observe({"altitude_msl_m": 7000, "on_ground": 1}, 1)
-        self.assertFalse(watch.observe({"altitude_msl_m": 914.4, "on_ground": 0}, 5))
+        self.assertFalse(watch.observe({"altitude_msl_m": 914.4, "on_ground": 0, "replay": 0}, 17))
+
+    def test_recorded_reset_with_ground_flag_delayed_past_three_seconds(self):
+        # September 26 capture: transient 22720 ft, then 3035 ft; ground
+        # contact cleared 3.032 seconds after the initial teleport.
+        watch = AltitudeReset()
+        watch.landed = True
+        watch.observe({'altitude_msl_m': 30.7 * .3048, 'on_ground': 1, 'replay': 0}, 0)
+        self.assertFalse(watch.observe({'altitude_msl_m': 22720.4 * .3048, 'on_ground': 1, 'replay': 0}, 1))
+        self.assertFalse(watch.observe({'altitude_msl_m': 3035.3 * .3048, 'on_ground': 1, 'replay': 0}, 3.920))
+        self.assertTrue(watch.observe({'altitude_msl_m': 3034.8 * .3048, 'on_ground': 0, 'replay': 0}, 4.032))
+        self.assertFalse(watch.observe({'altitude_msl_m': 914.4, 'on_ground': 0, 'replay': 0}, 4.1))
+
+    def test_split_packets_and_stale_status(self):
+        watch = AltitudeReset()
+        watch.landed = True
+        watch.observe({'altitude_msl_m': 3, 'on_ground': 0, 'replay': 0}, 0)
+        self.assertFalse(watch.observe({'altitude_msl_m': 914.4}, 2))
+        self.assertFalse(watch.observe({'on_ground': 0}, 2.1))
+        self.assertTrue(watch.observe({'replay': 0}, 2.2))
+
+    def test_stale_altitude_and_replay_cannot_trigger(self):
+        watch = AltitudeReset()
+        watch.landed = True
+        watch.observe({'altitude_msl_m': 3}, 0)
+        watch.observe({'altitude_msl_m': 914.4}, 1)
+        self.assertFalse(watch.observe({'on_ground': 0, 'replay': 0}, 3))
+        self.assertFalse(watch.observe({'altitude_msl_m': 914.4, 'on_ground': 0, 'replay': 1}, 3.1))
+        self.assertFalse(watch.observe({'altitude_msl_m': 914.4, 'on_ground': 0, 'replay': 0}, 3.2))
 
 
 class LandingTests(unittest.TestCase):

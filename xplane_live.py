@@ -148,28 +148,43 @@ class LandingCut:
 class AltitudeReset:
     """Recognize a reset teleport after landing, not a normal climb through 3000 ft."""
 
-    def __init__(self, target_ft=3000.0, tolerance_ft=150.0, jump_ft=1000.0):
+    def __init__(self, target_ft=3000.0, tolerance_ft=150.0, jump_ft=1000.0, settle_seconds=15.0):
         self.target_ft = target_ft
         self.tolerance_ft = tolerance_ft
         self.jump_ft = jump_ft
+        self.settle_seconds = settle_seconds
+        self.latest = {}
         self.previous_ft = None
         self.landed = False
         self.pending_until = None
 
     def observe(self, values, now=None):
         now = time.monotonic() if now is None else now
+        self.latest.update({name: (value, now) for name, value in values.items()
+                            if name in {'altitude_msl_m', 'on_ground', 'replay'}})
+        def fresh(name):
+            value, at = self.latest.get(name, (None, -math.inf))
+            return value if now - at <= 1 else None
+        if fresh('replay') == 1:
+            self.previous_ft = None
+            self.pending_until = None
+            return False
         altitude_m = values.get("altitude_msl_m")
+        if altitude_m is not None:
+            altitude_ft = altitude_m / 0.3048
+            if (self.landed and self.previous_ft is not None
+                    and altitude_ft - self.previous_ft >= self.jump_ft):
+                # Loading can emit an impossible altitude, then update ground
+                # contact later. Allow settling without requiring one UDP packet.
+                self.pending_until = now + self.settle_seconds
+            self.previous_ft = altitude_ft
+        altitude_m = fresh('altitude_msl_m')
         if altitude_m is None:
             return False
         altitude_ft = altitude_m / 0.3048
-        if (self.landed and self.previous_ft is not None
-                and altitude_ft - self.previous_ft >= self.jump_ft):
-            # Situation loading can emit one impossible altitude before settling.
-            self.pending_until = now + 3
         reset = (self.landed and self.pending_until is not None and now <= self.pending_until
                  and abs(altitude_ft - self.target_ft) <= self.tolerance_ft
-                 and values.get("on_ground") == 0 and values.get("replay", 0) == 0)
-        self.previous_ft = altitude_ft
+                 and fresh('on_ground') == 0 and fresh('replay') == 0)
         if reset:
             self.landed = False
             self.pending_until = None
