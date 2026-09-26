@@ -1,0 +1,5 @@
+# Tested SDK lifecycle: create, append, cool, verify and restore signals.
+marpledata==3.4.0.dev1
+pandas>=2.0.0
+pyarrow>=15.0.0
+trino>=0.336.0
