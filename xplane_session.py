@@ -16,10 +16,11 @@ from xplane_live import (Flight, Receiver, SIGNALS, FLIGHT_METADATA, CHALLENGE_P
 from xplane_aircraft import aircraft_mode, identity_key
 from xplane_sampling import LiveSampler, ReportTelemetry, SAMPLE_MODES, LIVE_SIGNALS
 from xplane_file_upload import FileUploadWorker, file_stream
+from xplane_reset import LandingReset, POSITION_FIELDS, fresh_values, reset_packet
 
 ACROBATIC_PREFIX = "Marple_Acrobatic_"
-LANDING_TAIL_SECONDS = 20.0
-LANDING_END_REASON = '20 seconds after first gear compression'
+LANDING_TAIL_SECONDS = 10.0
+LANDING_END_REASON = '10 seconds after first gear compression'
 
 
 def alert_packet(message):
@@ -85,12 +86,14 @@ class SessionController:
         self.latest={};self.seen=set();self.last_packet=None;self.worker=None;self.number=0
         self.countdown_until=None;self.timer=SessionTimer(duration);self.events=[]
         self.exit_requested=False
+        self.approach_start=None;self.resetter=LandingReset(receiver,self.log)
         self.record_file=None;self.record_path=None;self.session_manifest={};self.commands=queue.Queue();self.closed=False
         self.log_file=(folder/'session.log').open('a',buffering=1)
     def route(self,now):
         if not self.auto_route:return
         identity=self.receiver.identity.snapshot(now)
         if identity is None:
+            if self.resetter.active:return  # PREL can briefly interrupt identity while loading.
             if self.state in {'RECORDING','COUNTDOWN','WAITING'}:
                 self.stop(now,'aircraft identity unavailable')
             self.aircraft=None
@@ -98,6 +101,7 @@ class SessionController:
                 self.state='WAIT_ID';self.message='Waiting for confirmed aircraft identity over UDP…'
             return
         if self.aircraft is not None and identity_key(identity)==identity_key(self.aircraft):return
+        self.resetter.cancel()
         if self.state in {'RECORDING','COUNTDOWN','WAITING'}:
             self.stop(now,'aircraft changed')
         if self.state=='SAVING':return  # Finish the old dataset before applying new metadata.
@@ -139,6 +143,7 @@ class SessionController:
     def start(self,now):
         if self.state not in {'READY','COMPLETE','ERROR','WAIT_ID','WAIT_RESET'}:return
         if self.worker and not self.worker.done.is_set():return
+        if self.resetter.active:return
         if self.auto_route and self.aircraft is None:
             self.requested_start=True;self.state='WAIT_ID';return
         self.requested_start=False
@@ -146,6 +151,7 @@ class SessionController:
             self.landing_cycle=True;self.landing=LandingCut(LANDING_TAIL_SECONDS);self.reset_watch=AltitudeReset();self.reset_pending=False
         self.record_path=None;self.session_manifest={}
         self.file_worker=None
+        self.approach_start=None;self.resetter=LandingReset(self.receiver,self.log)
         self.worker=None;self.state='WAITING';self.message='Waiting for live, unpaused X-Plane telemetry…'
         self.countdown_until=None;self.timer=SessionTimer(self.duration)
     def prepare(self,now):
@@ -184,6 +190,7 @@ class SessionController:
     def stop(self,now,reason='operator stop'):
         if reason=='operator stop':
             self.landing_cycle=False;self.requested_start=False;self.reset_pending=False
+            self.resetter.cancel()
         if self.state in {'WAIT_ID','WAIT_RESET'}:
             self.state='READY';self.message='Stopped. Press S to start again.'
         if self.state=='RECORDING':
@@ -193,6 +200,9 @@ class SessionController:
             self.session_manifest.update(state='LOCAL_CAPTURE_COMPLETE',end_reason=reason,capture_complete=True)
             self.save_session()
             self.worker.finish(reason)
+            if self.mode=='landing' and reason==LANDING_END_REASON:
+                self.resetter.begin(now,self.latest,self.approach_start)
+                self.save_reset_status()
         elif self.state in {'WAITING','COUNTDOWN'}:
             if self.worker:
                 self.worker.finish('cancelled before recording');self.state='SAVING'
@@ -204,6 +214,15 @@ class SessionController:
         if self.state=='RECORDING':values=self.report_telemetry.add(mono,values)
         self.last_packet=mono;self.seen.update(values)
         self.latest.update({k:(v,mono) for k,v in values.items()})
+        if self.mode=='landing' and self.state=='RECORDING' and self.approach_start is None:
+            status=fresh_values(self.latest,mono,('paused','replay','on_ground'))
+            target=fresh_values(self.latest,mono,POSITION_FIELDS)
+            if status=={'paused':0,'replay':0,'on_ground':0} and target:
+                try:reset_packet(target)
+                except ValueError:pass
+                else:
+                    self.approach_start=target
+                    self.session_manifest['approach_start']=target;self.save_session()
         if self.mode=='landing' and self.aircraft is not None:
             if self.reset_watch.observe(values,mono):
                 self.reset_pending=True
@@ -221,7 +240,7 @@ class SessionController:
                             'flap_deploy_ratio','throttle_lever_1_ratio','throttle_lever_2_ratio']
                     self.session_manifest['touchdown_snapshot']={name:self.latest[name][0] for name in fields
                         if name in self.latest and mono-self.latest[name][1]<.5}
-                    self.save_session();self.log(f'First gear compression: uploading analysis file; realtime ends in {self.landing.tail:g} seconds. Keep taxiing.')
+                    self.save_session();self.log(f'First gear compression: uploading analysis file; pause and 3,000 ft reset in {self.landing.tail:g} seconds.')
                 if self.landing.expired(mono):self.stop(mono,LANDING_END_REASON)
         in_window=(self.mode=='landing' or (self.timer.started is not None and mono<self.timer.started+self.duration))
         if self.state=='RECORDING' and self.timer.started<=mono and in_window:
@@ -235,6 +254,9 @@ class SessionController:
                 except queue.Full:
                     self.log('Upload queue full; ending session. Complete controller journal retained.')
                     self.stop(time.monotonic(),'upload queue full')
+    def save_reset_status(self):
+        self.session_manifest['automatic_reset']={'state':self.resetter.state,'message':self.resetter.message}
+        self.save_session()
     def tick(self,now):
         self.route(now)
         while not self.commands.empty():
@@ -246,6 +268,7 @@ class SessionController:
                 self.sample_mode='high' if self.sample_mode=='low' else 'low'
                 self.log(f'Next flight live sampling: {self.sample_mode.upper()} ({SAMPLE_MODES[self.sample_mode]} Hz). Current dataset keeps its original rate.')
         if self.receiver.failure:
+            self.resetter.cancel()
             self.log('UDP receiver failed: '+self.receiver.failure);self.stop(now,'UDP failure')
             if self.state not in {'SAVING','RECORDING'}:self.state='ERROR';self.message='UDP receiver failed. Restart the service.'
         if self.state=='WAITING' and (not self.auto_route or self.aircraft is not None) and self.connected(now) and self.fresh('paused',now)==0 and self.fresh('replay',now)==0:self.prepare(now)
@@ -263,6 +286,12 @@ class SessionController:
                 for event in self.timer.tick(now):
                     if event=='warning':self.send_alert('10 seconds to go')
                     elif event=='stop':self.stop(now,'60-second session complete')
+        old_reset_state=self.resetter.state
+        self.resetter.update(now,self.latest)
+        if old_reset_state!=self.resetter.state:
+            self.save_reset_status()
+            if self.resetter.state=='COMPLETE':
+                self.reset_pending=True;self.reset_watch.landed=False
         if self.state=='SAVING' and self.worker and self.worker.done.is_set():
             manifest=self.worker.flight.manifest if self.worker.flight else {}
             success=not self.worker.error and manifest.get('state') in {'FINISHED','LOCAL_CAPTURE_COMPLETE'} and not manifest.get('upload_status')
@@ -271,9 +300,9 @@ class SessionController:
             if self.mode=='landing' and self.landing_cycle and self.aircraft is not None:
                 self.state='WAIT_RESET';self.message='Realtime ended. Use the SDK upload for analysis; reset to 3,000 ft for the next flight.'
                 if not success:self.message='Live finalization failed; SDK file has its own status above. Waiting for reset to 3,000 ft.'
-        if self.state=='WAIT_RESET' and self.reset_pending and not self.exit_requested:
+        if self.state=='WAIT_RESET' and self.reset_pending and not self.exit_requested and not self.resetter.active:
             self.start(now)
-            self.message='3,000 ft reset detected. Waiting for live, unpaused telemetry…'
+            self.message='3,000 ft reset detected. Finish ISCS setup, then unpause to start the next recording.'
         if self.exit_requested and self.state not in {'SAVING','RECORDING','COUNTDOWN'}:
             if all(w.done.is_set() for w in self.file_workers):self.closed=True
             else:self.message='Waiting for SDK file uploads before exiting…'
@@ -289,7 +318,7 @@ class SessionController:
                 'uploaded':flight.manifest.get('confirmed_uploaded_packets',0) if flight else 0,
                 'queue':self.worker.jobs.qsize() if self.worker else 0,
                 'cloud_failed':bool(self.worker and (self.worker.error or (flight and flight.failed))),'message':self.message,'events':list(self.events),
-                'pause': 'automatic pause disabled'}
+                'pause': self.resetter.message if self.mode=='landing' else 'automatic pause disabled'}
     def close(self):
         if self.record_file:self.record_file.close()
         for worker in self.file_workers:
@@ -339,7 +368,7 @@ def draw_console(screen,controller):
                '', ' [S] Start   [X] Stop & save   [R] Low/High (next flight)   [Q] Quit safely',
                ' Local capture/detection: 10 Hz; HTTP batches paced >=1.05s after response.','',
                ' Recent activity:',*[' '+line for line in status['events']], '',
-               (' Landing: SDK file at touchdown; live +20s; no auto-pause. Reset to 3,000 ft for next flight.' if status['mode']=='landing' else ' Timer: 60 wall-clock seconds. No auto-pause. Dismiss alerts promptly.')]
+               (' Landing: SDK file at touchdown; pause/reset +10s; ISCS and unpause are manual.' if status['mode']=='landing' else ' Timer: 60 wall-clock seconds. No auto-pause. Dismiss alerts promptly.')]
         for row,line in enumerate(lines[:max(0,height-1)]):
             style=curses.A_BOLD if row in [0,2] else 0
             if curses.has_colors():

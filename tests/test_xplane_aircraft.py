@@ -64,11 +64,11 @@ class RoutingTests(unittest.TestCase):
     def tearDown(self):
         self.worker_patch.stop();self.controller.close();self.temp.cleanup()
     def feed(self,now,ground=0,compression=0,alt=914.4):
-        self.controller.feed(int(now*1e9),now,{'paused':0,'replay':0,'on_ground':ground,'altitude_msl_m':alt,'gear_0_compression_m':compression})
+        self.controller.feed(int(now*1e9),now,{'paused':0,'replay':0,'on_ground':ground,'altitude_msl_m':alt,'gear_0_compression_m':compression,'latitude_deg':39.55,'longitude_deg':2.73,'heading_true_deg':90,'true_airspeed_mps':75})
     def test_waits_for_identity_instead_of_mislabelling(self):
         c=self.controller;c.commands.put('start');self.feed(100);c.tick(100)
         self.assertIsNone(c.worker);self.assertEqual(c.state,'WAIT_ID')
-    def test_toliss_uploads_at_touchdown_and_stops_live_twenty_seconds_later(self):
+    def test_toliss_uploads_at_touchdown_and_stops_live_ten_seconds_later(self):
         c=self.start_landed_capture()
         self.assertEqual(c.worker.metadata['Capture Type'],'Live')
         self.assertEqual(c.worker.metadata['A/C Model'],'Airbus A320')
@@ -80,27 +80,30 @@ class RoutingTests(unittest.TestCase):
         samples=[json.loads(line) for line in upload.journal.read_text().splitlines()]
         self.assertEqual(samples[-1]['gear_0_compression_m'],.1)
         self.assertEqual(samples[-1]['time'],102_000_000_000)
-        self.assertEqual(c.session_manifest['cutoff_time_ns'],122_000_000_000)
+        self.assertEqual(c.session_manifest['cutoff_time_ns'],112_000_000_000)
         before=upload.path.read_bytes()
         self.feed(103,ground=1,compression=.2,alt=3)
-        self.feed(121.99,ground=1,compression=.2,alt=3);c.tick(121.99)
+        self.feed(111.99,ground=1,compression=.2,alt=3);c.tick(111.99)
         self.assertEqual(c.state,'RECORDING')
-        self.assertAlmostEqual(c.snapshot(121.99)['remaining'],.01)
-        old=c.worker;c.tick(122)
+        self.assertAlmostEqual(c.snapshot(111.99)['remaining'],.01)
+        old=c.worker;c.tick(112)
         self.assertEqual(c.state,'WAIT_RESET')
-        self.assertEqual(old.reason,'20 seconds after first gear compression')
+        self.assertEqual(old.reason,'10 seconds after first gear compression')
         self.assertIs(c.file_worker,upload)
         self.assertEqual(upload.path.read_bytes(),before)
-        self.receiver.sock.sendto.assert_not_called()
-        # A reset while manually paused still waits for unpause.
-        c.feed(123_000_000_000,123,{'paused':1,'on_ground':1,'replay':0,'altitude_msl_m':6925})
-        c.feed(126_000_000_000,126,{'altitude_msl_m':914.4})
-        c.feed(126_100_000_000,126.1,{'paused':1,'on_ground':0,'replay':0})
-        c.tick(126.1);self.assertEqual(c.state,'WAITING')
-        self.feed(127);c.tick(127)
+        self.assertEqual(self.receiver.sock.sendto.call_args.args[0],command_packet('sim/operation/pause_toggle'))
+        # Confirm pause before PREL, then verify the new location remains paused.
+        c.feed(112_100_000_000,112.1,{'paused':1,'replay':0});c.tick(112.1)
+        self.assertEqual(self.receiver.sock.sendto.call_args.args[0][:4],b'PREL')
+        c.feed(112_200_000_000,112.2,{'paused':1,'replay':0,'altitude_msl_m':914.4,
+            'latitude_deg':39.55,'longitude_deg':2.73})
+        c.tick(112.2);self.assertEqual(c.state,'WAITING')
+        self.assertIn('ISCS',c.message)
+        self.assertEqual(self.receiver.sock.sendto.call_count,2)
+        self.feed(113);c.tick(113)
         self.assertEqual(c.state,'RECORDING')
         self.assertEqual(c.worker.name,'A320_Landing_Challenge_002')
-        self.receiver.sock.sendto.assert_not_called()
+        self.assertEqual(self.receiver.sock.sendto.call_count,2)
 
     def start_landed_capture(self):
         c=self.controller;self.receiver.identity.snapshot.return_value=TOLISS
@@ -108,26 +111,42 @@ class RoutingTests(unittest.TestCase):
         self.feed(100.1);self.feed(101.2);self.feed(102,ground=1,compression=.1,alt=3)
         return c
 
-    def test_landing_cutoff_excludes_boundary_sample_without_pausing(self):
+    def test_landing_cutoff_excludes_boundary_sample_before_pause(self):
         c=self.start_landed_capture();old=c.worker;count=old.jobs.qsize()
-        self.feed(122,ground=1,compression=.1,alt=3);c.tick(122);c.tick(122.1)
+        self.feed(112,ground=1,compression=.1,alt=3);c.tick(112);c.tick(112.1)
         self.assertEqual(old.jobs.qsize(),count)
-        self.assertEqual(old.reason,'20 seconds after first gear compression')
+        self.assertEqual(old.reason,'10 seconds after first gear compression')
+        self.receiver.sock.sendto.assert_called_once_with(command_packet('sim/operation/pause_toggle'),self.receiver.target)
+
+    def test_cutoff_with_stale_telemetry_does_not_toggle_or_reset(self):
+        c=self.start_landed_capture();c.tick(112)
+        self.assertEqual(c.state,'WAIT_RESET')
+        self.assertEqual(c.session_manifest['automatic_reset']['state'],'ERROR')
         self.receiver.sock.sendto.assert_not_called()
 
-    def test_cutoff_with_paused_or_stale_telemetry_never_controls_simulator(self):
-        c=self.start_landed_capture()
-        c.feed(121_900_000_000,121.9,{'paused':1});c.tick(122)
-        self.assertEqual(c.state,'WAIT_RESET')
-        self.assertNotIn('pause_request',c.session_manifest)
-        self.receiver.sock.sendto.assert_not_called()
+    def test_pause_reset_does_not_wait_for_cloud_or_brief_identity_gap(self):
+        c=self.start_landed_capture();old=c.worker;old.finish=MagicMock()
+        self.feed(111.9,ground=1,compression=.1,alt=3);c.tick(112)
+        self.assertEqual(c.state,'SAVING')
+        c.feed(112_100_000_000,112.1,{'paused':1,'replay':0});c.tick(112.1)
+        self.assertEqual(c.resetter.state,'WAIT_POSITION')
+        self.receiver.identity.snapshot.return_value=None
+        c.feed(112_200_000_000,112.2,{'paused':1,'replay':0,'altitude_msl_m':914.4,
+            'latitude_deg':39.55,'longitude_deg':2.73});c.tick(112.2)
+        self.assertEqual(c.resetter.state,'COMPLETE')
+        self.assertEqual(c.state,'SAVING')
+        self.assertEqual(self.receiver.sock.sendto.call_count,2)
+        self.receiver.identity.snapshot.return_value=TOLISS
+        old.done.set();old.flight.manifest['state']='FINISHED';c.tick(112.3)
+        self.assertEqual(c.state,'WAITING')
+        self.assertIn('ISCS',c.message)
 
     def test_file_ready_even_when_live_finalization_fails(self):
         c=self.start_landed_capture();old=c.worker
         old.finish=MagicMock()
-        c.tick(122)
+        c.tick(112)
         self.assertEqual(c.state,'SAVING')
-        old.finish.assert_called_once_with('20 seconds after first gear compression')
+        old.finish.assert_called_once_with('10 seconds after first gear compression')
         c.file_worker.join(5)
         self.assertEqual(c.file_worker.manifest['state'],'LOCAL_FILE_READY')
         old.error='Live cooling failed';old.done.set();c.tick(123)
@@ -151,7 +170,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(c.sampler.hz,1)
         c.commands.put('rate');c.tick(102.1)
         self.assertEqual(c.sample_mode,'high');self.assertEqual(c.sampler.hz,1)
-        self.feed(121.9,ground=1,compression=.1,alt=3);c.tick(122)
+        self.feed(111.9,ground=1,compression=.1,alt=3);c.tick(112);c.tick(116)
         self.feed(123);c.tick(123);c.tick(123.01)
         self.assertEqual(c.state,'RECORDING');self.assertEqual(c.sampler.hz,10)
         self.assertEqual(c.worker.metadata['Live Sample Rate Hz'],10)

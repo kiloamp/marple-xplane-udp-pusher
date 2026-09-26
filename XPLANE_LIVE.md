@@ -121,7 +121,7 @@ for a confirmed ToLiss and cancelled when that identity is lost or changed.
 
 | Aircraft | Flow | Metadata A/C Model | Dataset name |
 | --- | --- | --- | --- |
-| ToLiss Airbus | Full file upload at compression; live +20 s; wait for reset | Airbus A320 | A320_Landing_Challenge_XXX |
+| ToLiss Airbus | Full file upload at compression; live +10 s; pause/reset; manual ISCS/unpause | Airbus A320 | A320_Landing_Challenge_XXX |
 | Any other aircraft | S → 5 s preparation → 60 s flight → full file upload | Marple Acrobatic | Marple_Acrobatic_XXX |
 
 Both use `X-Plane Fair Live` previews and `X-Plane Flight Files` analysis files,
@@ -137,16 +137,34 @@ Landing detection arms after one observed second airborne with fresh running,
 non-replay telemetry. The **first gear compression over 0.1 mm** latches touchdown;
 bounces do not restart the timer. The first compression packet is included in an
 immutable full-rate file snapshot, uploaded immediately on a separate worker.
-**Twenty wall-clock seconds later** realtime recording stops and the preview
-is cooled. The simulator is never automatically paused by the main console.
+**Ten wall-clock seconds later** realtime recording stops and the preview
+is cooled. Landing mode requests pause and then a reset to 3000 ft MSL.
 The user can taxi during upload; the file ends at first touchdown, while the
-local session journal and live preview include the following 20 seconds.
+local session journal and live preview include the following 10 seconds.
 
-After a landing, an upward altitude jump of at least 1000 ft arms a 15-second
+The reset destination is the first fresh airborne latitude/longitude, true heading
+and true airspeed captured during this recording. `PREL` uses `loc_specify_lle=6`,
+user aircraft 0 and elevation 914.4 metres. Pause is confirmed before sending PREL;
+completion requires fresh position near the target, altitude within 50 ft and a
+paused state. If PREL resumes the simulator, one new pause request is permitted
+only after fresh post-reset telemetry confirms it is running. Pause confirmations
+have a three-second timeout; repositioning has a twenty-second timeout. No blind
+retries or automatic unpausing. The native packet matches X-Plane 11's bundled
+`Exchanging Data with X-Plane` specification.
+
+The operator handles ISCS configuration and unpauses. A ToLiss `.qps` scenario is
+not loaded. Timed mode remains unchanged and does not pause or reposition.
+X/Q cancels pending automatic reset commands. Aircraft changes cancel them too.
+The automatic reset is independent of live finalization and SDK file upload.
+If a command cannot be confirmed, use X-Plane/ISCS manually; inspect the session
+manifest's `automatic_reset` status. A confirmed reset waits for manual unpause
+before a new recording begins.
+
+For manual reset detection, an upward altitude jump of at least 1000 ft arms a 15-second
 reset window so situation loading and delayed ground-contact updates can settle.
 Fresh altitude, airborne and non-replay signals may arrive in separate packets.
 An airborne sample at 3000 ±150 ft MSL marks the next flight ready and is logged;
-the main console waits for fresh unpaused telemetry. Reset and unpause manually.
+the main console waits for fresh unpaused telemetry. Unpause manually after ISCS setup.
 An aircraft change ends the old capture before applying new metadata.
 
 Timed mode sends `START` via ALRT, then `10 seconds to go` at 50 seconds. Its
