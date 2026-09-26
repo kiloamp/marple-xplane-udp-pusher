@@ -201,6 +201,49 @@ well as live finalization. Credentials and all `outputs/` recordings stay out of
 The format and file-stream configuration follow the
 [Marple file plugin documentation](https://docs.marpledata.com/docs/marple-db/datastreams/supported-file-types).
 
+## Analysis names and review criteria
+
+Local files remain `<session-name>.parquet`; SDK `push_file(file_name=...)` names
+the uploaded file dataset `<session-name>.live`. The stream remains type `files`,
+and metadata remains `Capture Type: SDK upload`. Realtime preview names are
+unchanged. Sequence numbering recognises both historic `.parquet` and new `.live` names.
+
+Each SDK upload contains one `Flight Review` metadata string, selected from ten
+templates. The review is computed from the immutable raw snapshot before upload,
+also embedded in Parquet metadata and saved with supporting measurements in
+`raw-NNN.review.json`. It requires fresh, unpaused, non-replay, airborne samples.
+Observations are limited to one per second to avoid weighting high packet rates
+more heavily. Final approach means recorded height 100–1000 ft above local terrain.
+
+Rules below are evaluated in priority order. They are configurable code thresholds
+for this simulator challenge, not aircraft-specific operating limits or VREF checks.
+
+| Review | Evidence |
+| --- | --- |
+| Incomplete landing | At least 10 seconds recorded, but no confirmed first-compression ending (includes timed sessions) |
+| Insufficient data | Otherwise, fewer than 10 usable final-approach seconds or no fresh pre-contact bank/descent sample |
+| Brisk descent | Pre-contact descent greater than 600 ft/min |
+| Bank at touchdown | Absolute pre-contact bank greater than 5 degrees |
+| Late gear command | Gear handle up in more than 20% of at least five observations below 500 ft; does not infer gear lock |
+| Speed variation | Final-approach airspeed 90th–10th percentile spread greater than 20 kt |
+| Roll corrections | Absolute bank 90th percentile greater than 10 degrees |
+| Localizer deviation | More than 20% of at least 10 valid observations beyond one dot |
+| Glideslope deviation | More than 20% of at least 10 valid observations beyond one dot |
+| Steady approach | Enough measured data and none of the preceding thresholds exceeded |
+
+Initial-control praise requires at least five observations above 1000 ft in the
+first 20 seconds, bank 90th percentile at most 8 degrees and airspeed percentile
+spread at most 15 kt. Otherwise the review uses a neutral opening.
+
+ILS observations require a fresh ILS-channel NAV1 frequency, horizontal and vertical
+validity flags, and finite deviations within ±5 dots. ILS channel selection follows
+the [FAA AIM channel table](https://www.faa.gov/air_traffic/publications/atpubs/aim_html/chap1_section_1.html).
+Missing guidance is explicitly unassessed. Custom ToLiss raw ILS/display flags are
+never scored because their scaling/validity mapping has not been confirmed.
+Reviews cover recorded approach through first contact; the snapshot cannot assess
+bounces, rollout or peak post-contact loads. No new realtime signals or SDK calls
+are added for reviews.
+
 Recovery: `xplane_verify.py CAPTURE --dataset-id ID --repair` must be used with that
 dataset's own `flight-NNN.jsonl`. `xplane_push_capture.py` supports uploading an
 existing capture to a new empty dataset. The benchmark scripts replay recorded

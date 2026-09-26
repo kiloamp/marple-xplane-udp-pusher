@@ -43,6 +43,9 @@ class FileUploadTests(unittest.TestCase):
                     for s in self.samples for k, v in s.items() if k != 'time']
         self.assertEqual(table.to_pylist(), expected)
         self.assertEqual(table.schema.metadata[b'Capture Type'], b'SDK upload')
+        self.assertEqual(table.schema.metadata[b'Flight Review'].decode(),worker.metadata['Flight Review'])
+        self.assertEqual(json.loads(worker.journal.with_suffix('.review.json').read_text())['text'],worker.metadata['Flight Review'])
+        self.assertEqual(worker.manifest['name'],'A320_Landing_Challenge_001.live')
         self.assertEqual(worker.manifest['signal_count'], 4)
 
     def test_file_upload_uses_files_sdk_and_verifies_without_live_cooling(self):
@@ -54,7 +57,8 @@ class FileUploadTests(unittest.TestCase):
         worker = self.worker(stream)
         with patch('xplane_verify.verify_capture', return_value={'verified': True}) as verify:
             worker.run()
-        stream.push_file.assert_called_once_with(str(worker.path), metadata={'Capture Type': 'SDK upload'})
+        stream.push_file.assert_called_once_with(str(worker.path), file_name='A320_Landing_Challenge_001.live', metadata=worker.metadata)
+        self.assertIn('Flight Review',worker.metadata)
         dataset.cool.assert_not_called()
         verify.assert_called_once_with(dataset, worker.journal, repair=False, log=worker.log, timestamp_tolerance_ns=128)
         self.assertEqual(worker.manifest['state'], 'FINISHED')

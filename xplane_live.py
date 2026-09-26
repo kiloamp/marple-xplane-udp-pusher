@@ -60,7 +60,7 @@ def pause_simulator(receiver, paused, log=print):
 def next_remote_number(datasets, prefix=CHALLENGE_PREFIX):
     numbers = []
     for dataset in datasets:
-        match = re.fullmatch(re.escape(prefix) + r"(\d+)(?:\.parquet)?", getattr(dataset, "path", "") or "")
+        match = re.fullmatch(re.escape(prefix) + r"(\d+)(?:\.(?:parquet|live))?", getattr(dataset, "path", "") or "")
         if match:
             numbers.append(int(match[1]))
     return max(numbers, default=0) + 1

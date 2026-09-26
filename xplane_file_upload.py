@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from xplane_signals import signal_definitions
+from xplane_review import review_capture
 
 FILE_STREAM_NAME = 'X-Plane Flight Files'
 FILE_PLUGIN_ARGS = '--shape long --time-factor 1'
@@ -51,6 +52,9 @@ def export_snapshot(source, byte_limit, journal, parquet, metadata):
                 raise ValueError('Capture shorter than frozen upload boundary')
             dst.write(block)
             remaining -= len(block)
+    review = review_capture(journal, metadata)
+    metadata['Flight Review'] = review['text']
+    journal.with_suffix('.review.json').write_text(json.dumps(review, indent=2) + '\n')
     schema = pa.schema([('time', pa.int64()), ('signal', pa.string()), ('value', pa.float64())],
                        metadata={k: str(v) for k, v in metadata.items()})
     names = set()
@@ -89,7 +93,7 @@ class FileUploadWorker(threading.Thread):
         self.path = self.source.parent / f'{name}.parquet'
         self.manifest_path = self.source.parent / f'raw-{number:03d}.json'
         self.metadata = {**metadata, 'Capture Type': 'SDK upload'}
-        self.manifest = {'name': name, 'state': 'PREPARING', 'metadata': self.metadata,
+        self.manifest = {'name': f'{name}.live', 'state': 'PREPARING', 'metadata': self.metadata,
                          'source': str(self.source), 'source_bytes': byte_limit,
                          'file': str(self.path), 'stream': FILE_STREAM_NAME}
 
@@ -112,7 +116,7 @@ class FileUploadWorker(threading.Thread):
                 self.save()
                 # A files stream never acquires the realtime lifecycle. No cooling
                 # or modification of the live dataset is needed to analyze this file.
-                dataset = self.stream.push_file(str(self.path), metadata=self.metadata)
+                dataset = self.stream.push_file(str(self.path), file_name=self.manifest['name'], metadata=self.metadata)
                 self.manifest.update(dataset_id=dataset.id, state='IMPORTING', initial_import_status=dataset.import_status)
                 self.save()
                 dataset = wait_for_file_import(dataset)

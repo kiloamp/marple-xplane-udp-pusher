@@ -101,6 +101,25 @@ still drains and calls `cool()` at its cutoff.
 The original file retains exact timestamps; file verification allows up to 128 ns
 of observed importer rounding, with exact per-signal sample counts.
 
+## Dataset names and generated reviews
+
+The SDK analysis dataset is named `A320_Landing_Challenge_XXX.live` (or
+`Marple_Acrobatic_XXX.live`). It remains a **files** dataset tagged `SDK upload`;
+the local payload is still `.parquet`. The SDK's `file_name` override gives the
+uploaded dataset its `.live` name without changing the Parquet import configuration.
+
+Each new SDK file receives a **Flight Review** metadata field. One of ten
+templates is selected from measured speed variation, bank, gear-handle timing,
+pre-touchdown descent and valid standard NAV1 localizer/glideslope samples.
+Insufficient data and incomplete landings have their own reviews. There is no
+random assignment or external AI call. The chosen rule and measurements are
+saved in `raw-NNN.review.json`; thresholds are documented in [operating details](XPLANE_LIVE.md).
+
+Example: “Good initial speed and bank control, but the recorded ILS localizer
+was more than one dot from centre for 35% of valid final-approach samples.”
+The positive opening is included only when the recorded initial speed and bank
+support it. Unverified ToLiss raw ILS values do not contribute to the review.
+
 X/Q or a flight change before touchdown uploads the capture collected so far;
 timed sessions upload their full file when recording stops. Q waits for both
 workers. Unconfirmed uploads retain the file and an error manifest; do not blindly
@@ -118,6 +137,7 @@ Captures and manifests are stored under `outputs/xplane/`, excluded from Git.
   and low/high live sampling.
 - `xplane_reset.py`: telemetry-confirmed landing pause and UDP repositioning.
 - `xplane_file_upload.py`: immutable Parquet export and independent SDK file import.
+- `xplane_review.py`: ten evidence-based simulator review templates and criteria.
 - `xplane_verify.py`, `xplane_push_capture.py`: verification and recovery upload.
 - `xplane_benchmark*.py`: optional recorded-data replay throughput diagnostics;
   these create explicitly named benchmark datasets when run.
