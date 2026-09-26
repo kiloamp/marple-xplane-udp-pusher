@@ -8,6 +8,25 @@ import pandas as pd
 from xplane_verify import verify_capture
 
 class VerificationTests(unittest.TestCase):
+    def test_file_timestamp_rounding_tolerance_does_not_hide_missing_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp)/'raw.jsonl'
+            timestamp=1790451200614471000
+            p.write_text(json.dumps({'time':timestamp,'a':1})+'\n')
+            dataset=MagicMock();dataset.id=42
+            dataset.get_signals.return_value=[SimpleNamespace(name='a',id=1)]
+            client=MagicMock();client.config.cold_catalog='cold';client.config.datapool='pool'
+            with patch('xplane_verify.load_local_env'),patch('xplane_verify.MarpleTrinoClient',return_value=client):
+                for count,drift,ok in [(1,128,True),(1,129,False),(2,0,False),(0,0,False)]:
+                    client.execute.return_value=SimpleNamespace(dataframe=pd.DataFrame([
+                        {'signal':1,'n':count,'first_time':timestamp+drift,'last_time':timestamp+drift}]))
+                    if ok:
+                        self.assertTrue(verify_capture(dataset,p,timestamp_tolerance_ns=128)['verified'])
+                        with self.assertRaises(RuntimeError):verify_capture(dataset,p)
+                    else:
+                        with self.assertRaises(RuntimeError):verify_capture(dataset,p,timestamp_tolerance_ns=128)
+            dataset.add_signals.assert_not_called()
+
     def test_bulk_repair_preserves_signal_times_and_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             p=Path(tmp)/'flight.jsonl'

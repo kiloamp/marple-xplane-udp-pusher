@@ -68,32 +68,39 @@ class RoutingTests(unittest.TestCase):
     def test_waits_for_identity_instead_of_mislabelling(self):
         c=self.controller;c.commands.put('start');self.feed(100);c.tick(100)
         self.assertIsNone(c.worker);self.assertEqual(c.state,'WAIT_ID')
-    def test_toliss_pauses_at_five_second_cutoff_then_waits_for_reset_and_unpause(self):
-        c=self.controller;self.receiver.identity.snapshot.return_value=TOLISS
-        self.feed(100);c.tick(100)
-        self.assertEqual(c.state,'RECORDING');self.assertEqual(c.mode,'landing')
+    def test_toliss_uploads_at_touchdown_and_stops_live_twenty_seconds_later(self):
+        c=self.start_landed_capture()
+        self.assertEqual(c.worker.metadata['Capture Type'],'Live')
         self.assertEqual(c.worker.metadata['A/C Model'],'Airbus A320')
-        self.assertEqual(c.worker.name,'A320_Landing_Challenge_001')
-        self.feed(100.1);self.feed(101.2);self.feed(102,ground=1,compression=.1,alt=3)
-        self.feed(106.99,ground=1,compression=.1,alt=3)
-        c.tick(106.99);self.assertEqual(c.state,'RECORDING')
-        self.assertAlmostEqual(c.snapshot(106.99)['remaining'],.01)
-        self.assertEqual(c.session_manifest['cutoff_time_ns'],107_000_000_000)
+        upload=c.file_worker
+        self.assertIsNotNone(upload)
+        upload.join(5)
+        self.assertEqual(upload.manifest['state'],'LOCAL_FILE_READY')
+        self.assertEqual(upload.metadata['Capture Type'],'SDK upload')
+        samples=[json.loads(line) for line in upload.journal.read_text().splitlines()]
+        self.assertEqual(samples[-1]['gear_0_compression_m'],.1)
+        self.assertEqual(samples[-1]['time'],102_000_000_000)
+        self.assertEqual(c.session_manifest['cutoff_time_ns'],122_000_000_000)
+        before=upload.path.read_bytes()
+        self.feed(103,ground=1,compression=.2,alt=3)
+        self.feed(121.99,ground=1,compression=.2,alt=3);c.tick(121.99)
+        self.assertEqual(c.state,'RECORDING')
+        self.assertAlmostEqual(c.snapshot(121.99)['remaining'],.01)
+        old=c.worker;c.tick(122)
+        self.assertEqual(c.state,'WAIT_RESET')
+        self.assertEqual(old.reason,'20 seconds after first gear compression')
+        self.assertIs(c.file_worker,upload)
+        self.assertEqual(upload.path.read_bytes(),before)
         self.receiver.sock.sendto.assert_not_called()
-        old=c.worker;c.tick(107);self.assertEqual(c.state,'WAIT_RESET')
-        self.assertEqual(old.reason,'5 seconds after first gear compression')
-        self.receiver.sock.sendto.assert_called_once_with(command_packet('sim/operation/pause_toggle'),self.receiver.target)
-        c.feed(107_100_000_000,107.1,{'paused':1});c.tick(107.1)
-        self.assertTrue(c.pause_confirmed)
-        # Reset while paused must wait for the operator to unpause before recording.
-        c.feed(108_000_000_000,108,{'paused':1,'on_ground':1,'replay':0,'altitude_msl_m':6925})
-        c.feed(111_000_000_000,111,{'altitude_msl_m':914.4})
-        c.feed(111_100_000_000,111.1,{'paused':1,'on_ground':0,'replay':0})
-        c.tick(111.1);c.tick(111.2);self.assertEqual(c.state,'WAITING')
-        self.assertIn('3,000 ft reset detected',c.message)
-        self.feed(112);c.tick(112)
-        self.assertEqual(c.state,'RECORDING');self.assertEqual(c.worker.name,'A320_Landing_Challenge_002')
-        self.receiver.sock.sendto.assert_called_once()
+        # A reset while manually paused still waits for unpause.
+        c.feed(123_000_000_000,123,{'paused':1,'on_ground':1,'replay':0,'altitude_msl_m':6925})
+        c.feed(126_000_000_000,126,{'altitude_msl_m':914.4})
+        c.feed(126_100_000_000,126.1,{'paused':1,'on_ground':0,'replay':0})
+        c.tick(126.1);self.assertEqual(c.state,'WAITING')
+        self.feed(127);c.tick(127)
+        self.assertEqual(c.state,'RECORDING')
+        self.assertEqual(c.worker.name,'A320_Landing_Challenge_002')
+        self.receiver.sock.sendto.assert_not_called()
 
     def start_landed_capture(self):
         c=self.controller;self.receiver.identity.snapshot.return_value=TOLISS
@@ -101,43 +108,52 @@ class RoutingTests(unittest.TestCase):
         self.feed(100.1);self.feed(101.2);self.feed(102,ground=1,compression=.1,alt=3)
         return c
 
-    def test_landing_feed_at_cutoff_pauses_once_and_excludes_boundary_sample(self):
-        c=self.start_landed_capture()
-        old=c.worker;count=old.jobs.qsize()
-        self.feed(107,ground=1,compression=.1,alt=3);c.tick(107);c.tick(107.1)
+    def test_landing_cutoff_excludes_boundary_sample_without_pausing(self):
+        c=self.start_landed_capture();old=c.worker;count=old.jobs.qsize()
+        self.feed(122,ground=1,compression=.1,alt=3);c.tick(122);c.tick(122.1)
         self.assertEqual(old.jobs.qsize(),count)
-        self.assertEqual(old.reason,'5 seconds after first gear compression')
-        self.receiver.sock.sendto.assert_called_once_with(command_packet('sim/operation/pause_toggle'),self.receiver.target)
+        self.assertEqual(old.reason,'20 seconds after first gear compression')
+        self.receiver.sock.sendto.assert_not_called()
 
-    def test_landing_cutoff_does_not_unpause_already_paused_simulator(self):
+    def test_cutoff_with_paused_or_stale_telemetry_never_controls_simulator(self):
         c=self.start_landed_capture()
-        c.feed(106_900_000_000,106.9,{'paused':1});c.tick(107)
-        self.assertEqual(c.state,'WAIT_RESET');self.assertTrue(c.pause_confirmed)
-        self.receiver.sock.sendto.assert_not_called()
-
-    def test_landing_cutoff_still_saves_if_pause_state_is_stale(self):
-        c=self.start_landed_capture();c.tick(107)
+        c.feed(121_900_000_000,121.9,{'paused':1});c.tick(122)
         self.assertEqual(c.state,'WAIT_RESET')
-        self.assertEqual(c.session_manifest['pause_request'],'unavailable')
+        self.assertNotIn('pause_request',c.session_manifest)
         self.receiver.sock.sendto.assert_not_called()
 
-    def test_landing_pause_and_cutoff_do_not_wait_for_cloud_worker(self):
+    def test_file_ready_even_when_live_finalization_fails(self):
         c=self.start_landed_capture();old=c.worker
         old.finish=MagicMock()
-        self.feed(106.9,ground=1,compression=.1,alt=3);c.tick(107);c.tick(107.1)
+        c.tick(122)
         self.assertEqual(c.state,'SAVING')
-        old.finish.assert_called_once_with('5 seconds after first gear compression')
-        self.receiver.sock.sendto.assert_called_once_with(command_packet('sim/operation/pause_toggle'),self.receiver.target)
+        old.finish.assert_called_once_with('20 seconds after first gear compression')
+        c.file_worker.join(5)
+        self.assertEqual(c.file_worker.manifest['state'],'LOCAL_FILE_READY')
+        old.error='Live cooling failed';old.done.set();c.tick(123)
+        self.assertEqual(c.state,'WAIT_RESET')
+        self.assertIn('LOCAL_FILE_READY',c.snapshot(123)['analysis'])
+        self.feed(124);c.tick(124);c.tick(124.01)
+        self.assertEqual(c.state,'RECORDING')
+        self.receiver.sock.sendto.assert_not_called()
+
+    def test_quit_waits_for_file_worker_even_after_live_finished(self):
+        c=self.controller
+        pending=MagicMock();pending.done.is_set.return_value=False;pending.is_alive.return_value=False
+        c.file_workers.append(pending)
+        c.exit_requested=True;c.tick(100)
+        self.assertFalse(c.closed)
+        pending.done.is_set.return_value=True;c.tick(101)
+        self.assertTrue(c.closed)
 
     def test_rate_toggle_applies_to_next_flight_and_metadata(self):
         c=self.start_landed_capture();old=c.worker
-        self.assertEqual(c.sampler.hz,1);self.assertEqual(old.metadata['Live Sample Rate Hz'],1)
+        self.assertEqual(c.sampler.hz,1)
         c.commands.put('rate');c.tick(102.1)
         self.assertEqual(c.sample_mode,'high');self.assertEqual(c.sampler.hz,1)
-        self.feed(106.9,ground=1,compression=.1,alt=3);c.tick(107)
-        self.feed(108);c.tick(108);c.tick(108.01)
-        self.assertEqual(c.state,'RECORDING')
-        self.assertEqual(c.sampler.hz,10)
+        self.feed(121.9,ground=1,compression=.1,alt=3);c.tick(122)
+        self.feed(123);c.tick(123);c.tick(123.01)
+        self.assertEqual(c.state,'RECORDING');self.assertEqual(c.sampler.hz,10)
         self.assertEqual(c.worker.metadata['Live Sample Rate Hz'],10)
         self.assertEqual(old.metadata['Live Sample Rate Hz'],1)
 
@@ -158,7 +174,7 @@ class RoutingTests(unittest.TestCase):
         c=self.controller;self.receiver.identity.snapshot.return_value=TOLISS
         self.feed(100);c.tick(100);self.feed(161);c.tick(161)
         self.assertEqual(c.state,'RECORDING');self.receiver.sock.sendto.assert_not_called()
-    def test_other_plane_metadata_and_timed_pause(self):
+    def test_other_plane_metadata_and_timed_finish_without_pause(self):
         c=self.controller;self.receiver.identity.snapshot.return_value=OTHER
         self.feed(100);c.tick(100);self.assertEqual(c.state,'READY')
         c.commands.put('start');c.tick(100);self.assertEqual(c.state,'COUNTDOWN')
@@ -167,7 +183,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(c.worker.name,'Marple_Acrobatic_001');self.assertEqual(c.state,'RECORDING')
         c.tick(155);self.feed(164.9);c.tick(165)
         sent=[x.args[0][:4] for x in self.receiver.sock.sendto.call_args_list]
-        self.assertEqual(sent,[b'ALRT',b'ALRT',b'CMND']);self.assertEqual(c.state,'COMPLETE')
+        self.assertEqual(sent,[b'ALRT',b'ALRT']);self.assertEqual(c.state,'COMPLETE')
     def test_aircraft_change_finalizes_old_metadata_before_new_flight(self):
         c=self.controller;self.receiver.identity.snapshot.return_value=TOLISS
         self.feed(100);c.tick(100);old=c.worker

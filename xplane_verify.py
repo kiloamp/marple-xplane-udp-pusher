@@ -12,7 +12,7 @@ from env_loader import load_local_env
 from xplane_marple import MarpleTrinoClient
 
 
-def verify_capture(dataset, capture: Path, *, repair=False, log=print):
+def verify_capture(dataset, capture: Path, *, repair=False, log=print, timestamp_tolerance_ns=0):
     load_local_env()
     expected = {}
     for line in capture.read_text().splitlines():
@@ -34,7 +34,8 @@ def verify_capture(dataset, capture: Path, *, repair=False, log=print):
             signal = signals.get(name)
             found = lookup.get(signal.id) if signal else None
             if (found is None or found.n != len(rows)
-                    or found.first_time != rows[0]["time"] or found.last_time != rows[-1]["time"]):
+                    or abs(found.first_time - rows[0]["time"]) > timestamp_tolerance_ns
+                    or abs(found.last_time - rows[-1]["time"]) > timestamp_tolerance_ns):
                 bad.append(name)
         return bad, actual
 
@@ -70,6 +71,7 @@ def verify_capture(dataset, capture: Path, *, repair=False, log=print):
             time.sleep(1)
     result = {"dataset_id": dataset.id, "verified": not bad,
               "verification": "per-signal count and first/last timestamp in cold storage",
+              "timestamp_tolerance_ns": timestamp_tolerance_ns,
               "expected_datapoints": sum(map(len, expected.values())),
               "actual_datapoints": int(actual.n.sum()), "signals": len(expected),
               "repaired_signals": repaired, "mismatched_signals": bad}

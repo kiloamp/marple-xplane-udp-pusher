@@ -1,6 +1,6 @@
 # X-Plane UDP → Marple Live Recorder
 
-Stream X-Plane telemetry to Marple DB, with one dataset per flight. The Python
+Stream X-Plane telemetry to Marple DB, with separate live and analysis datasets per flight. The Python
 service receives native UDP RREF/DATA packets, keeps a local journal, batches
 live uploads, and finalizes and verifies each completed dataset.
 
@@ -8,11 +8,14 @@ live uploads, and finalizes and verifies each completed dataset.
 
 | Aircraft | Recording flow | Dataset name |
 | --- | --- | --- |
-| ToLiss Airbus | Automatic recording; ends and requests a pause 5 seconds after first landing-gear compression; reset to 3000 ft and unpause for a new dataset | `A320_Landing_Challenge_XXX` |
-| Any other aircraft | Press S; 5-second preparation; 60-second flight; warning at 10 seconds remaining; pause request and finalize | `Marple_Acrobatic_XXX` |
+| ToLiss Airbus | Automatic recording; full file upload at first gear compression; live ends 20 seconds later; reset to 3000 ft for the next flight | `A320_Landing_Challenge_XXX` |
+| Any other aircraft | Press S; 5-second preparation; 60-second flight; warning at 10 seconds remaining; stop and upload full file | `Marple_Acrobatic_XXX` |
 
-Both modes use the `X-Plane Fair Live` datastream. The console shows aircraft,
-mode, recording state, upload queue and recent activity. FlyWithLua is not required.
+Both modes use `X-Plane Fair Live` for the preview and `X-Plane Flight Files` for
+analysis. Metadata `Capture Type` is `Live` or `SDK upload`; the original aircraft,
+airport and flight-type metadata is retained. **Neither mode automatically pauses
+the simulator.** The console shows the SDK file status and dataset ID. Open the
+`SDK upload` dataset in Insight for analysis. FlyWithLua is not required.
 
 ## Quick start
 
@@ -57,13 +60,17 @@ It derives distance covered and report-friendly units. Confirmed ToLiss aircraft
 also supply ten custom flight-director, autopilot, autothrust and ILS indications.
 Up to 57 signals are recorded for other aircraft, or 67 for ToLiss.
 
-The default **LOW** mode sends at most one sample per signal per second to Marple;
+Realtime sends only eight signals: airspeed KIAS, altitude MSL ft, roll, pitch,
+magnetic heading, latitude, longitude and vertical speed FPM. All other received
+channels stay in the full-rate file.
+
+The default **LOW** mode sends at most one sample per preview signal per second;
 **HIGH** sends up to ten. Select `--sample-mode low|high` or press **R** in the console
 for the next flight. Local capture and touchdown detection stay at 10 Hz in both
 modes. Each dataset keeps a single selected rate. HTTP batch pacing remains at
 least 1.05 seconds after the previous response; sample rate is not UI refresh rate.
 
-The full-rate local journal and touchdown snapshot prepare a future landing PDF.
+The SDK analysis file and touchdown snapshot prepare a future landing PDF.
 Automatic PDF generation/scoring is not included yet. ToLiss ILS values with
 unverified scales remain explicitly raw, with separate display flags.
 See [operating details](XPLANE_LIVE.md) for the signal groups and interpretation.
@@ -71,9 +78,25 @@ Legacy checkbox capture requires explicit `--include-data` and is normally disab
 
 ## Completion and recovery
 
-After the cutoff the service flushes remaining samples, calls `cool()`, waits for
-`FINISHED`, then checks per-signal sample counts and first/last timestamps in Marple
-cold storage through Trino. Incomplete signals are restored from the local journal.
+At first landing-gear compression, the service freezes a full-rate snapshot,
+including the touchdown packet, and uploads it through SDK `push_file()` as a
+Parquet file. It preserves every received numeric signal and original nanosecond
+timestamp. The analysis file ends at first touchdown; the 20-second taxi tail
+continues in realtime and the local session journal. Upload duration depends on
+network/import time and does not change the realtime deadline.
+
+The file uses a **files** datastream, never a realtime dataset. Its import and
+cold-storage verification run independently of live cooling. The console reports
+`FINISHED` only after checking sample counts and time bounds through Trino. A live
+cooling failure does not invalidate this analysis dataset. The small live preview
+still drains and calls `cool()` at its cutoff.
+The original file retains exact timestamps; file verification allows up to 128 ns
+of observed importer rounding, with exact per-signal sample counts.
+
+X/Q or a flight change before touchdown uploads the capture collected so far;
+timed sessions upload their full file when recording stops. Q waits for both
+workers. Unconfirmed uploads retain the file and an error manifest; do not blindly
+retry an uncertain upload, since it may already exist in Marple.
 Captures and manifests are stored under `outputs/xplane/`, excluded from Git.
 
 ## Code layout
@@ -85,6 +108,7 @@ Captures and manifests are stored under `outputs/xplane/`, excluded from Git.
 - `xplane_marple.py`, `env_loader.py`: SDK and Trino connections, local credentials.
 - `xplane_report_signals.py`, `xplane_sampling.py`: report channels, distance derivation
   and low/high live sampling.
+- `xplane_file_upload.py`: immutable Parquet export and independent SDK file import.
 - `xplane_verify.py`, `xplane_push_capture.py`: verification and recovery upload.
 - `xplane_benchmark*.py`: optional recorded-data replay throughput diagnostics;
   these create explicitly named benchmark datasets when run.

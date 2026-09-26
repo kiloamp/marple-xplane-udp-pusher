@@ -14,7 +14,7 @@ from xplane_live import (AltitudeReset, Flight, LandingCut, SIGNALS, FLIGHT_META
 class NamingTests(unittest.TestCase):
     def test_numbering_survives_restart_and_existing_remote_names(self):
         from types import SimpleNamespace
-        remote = [SimpleNamespace(path=p) for p in ["A320_Landing_Challenge_001", "A320_Landing_Challenge_012", "other"]]
+        remote = [SimpleNamespace(path=p) for p in ["A320_Landing_Challenge_001", "A320_Landing_Challenge_012.parquet", "other"]]
         self.assertEqual(next_remote_number(remote), 13)
         with tempfile.TemporaryDirectory() as folder:
             state = Path(folder) / "sequence.json"

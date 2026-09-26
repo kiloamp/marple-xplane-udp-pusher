@@ -29,7 +29,7 @@ sample rate and the requested local capture rate.
 
 ## Rates and data paths
 
-| Mode | Local RREF capture / detection | Samples sent to Marple |
+| Mode | Local RREF capture / detection | Samples sent to the eight-signal live preview |
 | --- | --- | --- |
 | LOW (default) | Requested 10 Hz | At most one sample per signal per 1-second bucket |
 | HIGH | Requested 10 Hz | At most one sample per signal per 0.1-second bucket |
@@ -40,6 +40,11 @@ missing signals with old values. Different signals arriving in separate packets
 are sampled independently. HTTP uploads batch those selected samples; they are
 paced at least 1.05 seconds **after the previous response**, so 1 Hz signal sampling
 does not promise one HTTP call or screen update per second.
+
+The live preview contains only `airspeed_kias`, `altitude_msl_ft`, `roll_deg`,
+`pitch_deg`, `heading_magnetic_deg`, `latitude_deg`, `longitude_deg` and
+`vertical_speed_fpm`. Heading is magnetic; no extra control/status signals are
+sent live. Full-rate file capture still includes all returned/derived channels.
 
 The main console writes the full received, enriched telemetry to `session-NNN.jsonl`
 and the selected upload data to `flight-NNN.jsonl`. Thus LOW preserves fine local
@@ -71,7 +76,8 @@ uploaded. Engine 2 and jet N1 fields are meaningful only on appropriate aircraft
 
 Names, units, descriptions and dataref paths are in `xplane_live.py` and
 `xplane_report_signals.py`. Every dataset receives signal descriptions and each
-flight saves `flight-NNN.signals.json` with the observed definitions.
+flight saves `flight-NNN.signals.json` for live signals and `raw-NNN.signals.json`
+for the full analysis file.
 
 Important distinctions for a future PDF report:
 
@@ -115,10 +121,12 @@ for a confirmed ToLiss and cancelled when that identity is lost or changed.
 
 | Aircraft | Flow | Metadata A/C Model | Dataset name |
 | --- | --- | --- | --- |
-| ToLiss Airbus | Automatic landing capture; compression +5 s; pause; wait for reset | Airbus A320 | A320_Landing_Challenge_XXX |
-| Any other aircraft | S → 5 s preparation → 60 s flight → pause | Marple Acrobatic | Marple_Acrobatic_XXX |
+| ToLiss Airbus | Full file upload at compression; live +20 s; wait for reset | Airbus A320 | A320_Landing_Challenge_XXX |
+| Any other aircraft | S → 5 s preparation → 60 s flight → full file upload | Marple Acrobatic | Marple_Acrobatic_XXX |
 
-Both use the `X-Plane Fair Live` datastream, independent sequence counters,
+Both use `X-Plane Fair Live` previews and `X-Plane Flight Files` analysis files,
+with metadata `Capture Type: Live` / `Capture Type: SDK upload`, separate dataset
+IDs and matching session names. They retain independent sequence counters,
 Departure Airport `LEPA`, and Flight Type `Simulator Session`. The installed A319
 retains the requested `Airbus A320` metadata label; actual ICAO and description
 are recorded separately. Names are reserved locally before network creation;
@@ -127,37 +135,53 @@ computers against this shared stream at once.
 
 Landing detection arms after one observed second airborne with fresh running,
 non-replay telemetry. The **first gear compression over 0.1 mm** latches touchdown;
-bounces do not restart the timer. **Five wall-clock seconds later** recording ends
-and a UDP `CMND sim/operation/pause_toggle` request is sent before cloud finalization.
-No toggle is sent when already paused or pause state is stale. The main console
-checks subsequent telemetry for confirmation and never blindly retries. Failed or
-unconfirmed pauses are logged for manual action; recording still stops.
+bounces do not restart the timer. The first compression packet is included in an
+immutable full-rate file snapshot, uploaded immediately on a separate worker.
+**Twenty wall-clock seconds later** realtime recording stops and the preview
+is cooled. The simulator is never automatically paused by the main console.
+The user can taxi during upload; the file ends at first touchdown, while the
+local session journal and live preview include the following 20 seconds.
 
 After a landing, an upward altitude jump of at least 1000 ft arms a 15-second
 reset window so situation loading and delayed ground-contact updates can settle.
 Fresh altitude, airborne and non-replay signals may arrive in separate packets.
 An airborne sample at 3000 ±150 ft MSL marks the next flight ready and is logged;
 the main console waits for fresh unpaused telemetry. Reset and unpause manually.
-An aircraft change ends the old capture before applying new metadata. X/Q and
-resets do not trigger the landing pause command.
+An aircraft change ends the old capture before applying new metadata.
 
 Timed mode sends `START` via ALRT, then `10 seconds to go` at 50 seconds. Its
 60-second timer includes simulator pauses and dialogs: dismiss alerts promptly.
-It requests a pause at the deadline and finalizes, then waits for S again.
+It stops at the deadline, starts its SDK file upload and finalizes realtime, then
+waits for S again. It does not pause the simulator.
 
 ## Finalization and recovery
 
-The uploader drains selected samples, appends the final batch, calls `cool()`,
+The realtime uploader drains the eight selected signals, appends the final batch, calls `cool()`,
 waits for `FINISHED`, and compares cold-storage signal counts and first/last
 receiver timestamps with `flight-NNN.jsonl` through Trino. Missing/incomplete
 signals are restored from **that sampled upload journal**, not the full-rate
 session journal, so repair does not silently turn LOW into HIGH.
 
-The full-rate local journal remains available for a future detailed report.
-A failed or uncertain append is not blindly retried. Cooling/verification failure
-is shown as an error rather than confirmed completion. Do not close the terminal
-until finalization finishes. Credentials are loaded from `.env.local` and excluded
-from Git, as are all recordings under `outputs/`.
+The independent SDK worker copies only journal bytes committed at the trigger to
+`raw-NNN.jsonl`, writes `<session-name>.parquet`, and calls `push_file()` on the
+**files** stream `X-Plane Flight Files`. Its Parquet plugin uses `--shape long
+--time-factor 1`, preserving sparse per-signal samples and integer nanosecond
+timestamps. The worker waits through the upload/import queue handoff, adds signal
+descriptions, and verifies all signal counts and time bounds through Trino without
+repair. Its own `raw-NNN.json` manifest records the analysis dataset ID and status.
+File verification permits at most 128 ns of timestamp rounding observed in the
+Marple Parquet importer; all sample counts must match exactly. Local Parquet and
+JSONL timestamps remain exact, and realtime verification retains zero tolerance.
+
+Open the **SDK upload** dataset for analysis once it is `FINISHED`; it has no live
+lifecycle and does not depend on the live preview cooling successfully. The console
+shows its status independently. A failed or uncertain file upload is not blindly
+retried; the local file remains available. X/Q, aircraft changes or an early reset
+before touchdown upload the capture collected so far. Q waits for file workers as
+well as live finalization. Credentials and all `outputs/` recordings stay out of Git.
+
+The format and file-stream configuration follow the
+[Marple file plugin documentation](https://docs.marpledata.com/docs/marple-db/datastreams/supported-file-types).
 
 Recovery: `xplane_verify.py CAPTURE --dataset-id ID --repair` must be used with that
 dataset's own `flight-NNN.jsonl`. `xplane_push_capture.py` supports uploading an
@@ -171,8 +195,9 @@ configures its destination to this receiver on port 49005. It can add hundreds o
 signals and is unnecessary for the curated report set. The old DATA dictionary is
 retained so historical recordings and recovery remain usable.
 
-`--landing-mode` selects the legacy console, with the same 5-second landing rule
-and startup `--sample-mode low|high`, but no interactive R key. Its cloud calls are
+`--landing-mode` selects the old legacy console, which still has its 5-second pause rule
+and does not implement this split-file flow. Use the default `.command` for the new flow.
+The legacy console supports startup `--sample-mode low|high`, but no interactive R key. Its cloud calls are
 synchronous; use the default console for timing independent of upload latency.
 `--landing-mode --wait-for-reset` attaches after a completed landing.
 

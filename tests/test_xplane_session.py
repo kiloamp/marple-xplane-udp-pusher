@@ -26,19 +26,19 @@ class TimedSessionTests(unittest.TestCase):
         self.assertEqual(struct.unpack('<240s240s240s240s',p[5:])[0].rstrip(b'\0'),b'START')
         self.assertEqual(command_packet('sim/operation/pause_toggle'),b'CMND\0sim/operation/pause_toggle\0')
         with self.assertRaises(ValueError):alert_packet('x'*240)
-    def test_warning_once_and_pause_at_deadline_even_when_upload_stalled(self):
+    def test_warning_once_and_stop_at_deadline_even_when_upload_stalled(self):
         c=self.begin();c.tick(149.9);self.receiver.sock.sendto.assert_not_called()
         c.tick(150);c.tick(151)
         self.assertEqual(self.receiver.sock.sendto.call_count,1)
         c.feed(2,159.9,{'paused':0});c.tick(160)
         self.assertEqual(c.state,'SAVING');c.worker.finish.assert_called_once_with('60-second session complete')
-        self.assertEqual(self.receiver.sock.sendto.call_args.args[0],command_packet('sim/operation/pause_toggle'))
-        c.feed(3,160.1,{'paused':1});self.assertTrue(c.pause_confirmed)
-        self.assertEqual(c.worker.jobs.qsize(),2)
+        self.assertEqual(self.receiver.sock.sendto.call_count,1)
+        c.feed(3,160.1,{'paused':1});self.assertNotIn('pause_request',c.session_manifest)
+        self.assertEqual(c.worker.jobs.qsize(),1)
         self.assertEqual(len((self.folder/'record.jsonl').read_text().splitlines()),2)
     def test_no_pause_toggle_if_already_paused_or_status_stale(self):
         c=self.begin();c.feed(2,159.9,{'paused':1});c.tick(160)
-        self.receiver.sock.sendto.assert_not_called();self.assertTrue(c.pause_confirmed)
+        self.receiver.sock.sendto.assert_not_called();self.assertNotIn('pause_request',c.session_manifest)
     def test_disconnected_start_waits_and_cancel_creates_no_flight(self):
         c=self.controller;c.start(1);c.tick(10)
         self.assertEqual(c.state,'WAITING');self.assertIsNone(c.worker)

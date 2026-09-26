@@ -2,6 +2,10 @@
 import math
 
 SAMPLE_MODES = {'low': 1, 'high': 10}
+LIVE_SIGNALS = frozenset({
+    'airspeed_kias', 'altitude_msl_ft', 'roll_deg', 'pitch_deg',
+    'heading_magnetic_deg', 'latitude_deg', 'longitude_deg', 'vertical_speed_fpm',
+})
 
 
 class LiveSampler:
