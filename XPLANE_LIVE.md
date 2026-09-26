@@ -1,347 +1,178 @@
 # Flight Session Recorder
 
-Double-click **Start A320 Landing Challenge.command** as before. It now opens a
-terminal console that chooses the flow from the loaded aircraft; FlyWithLua is not needed. X-Plane can be started
-before or after the console.
+## Start and controls
 
-The recorder reads ICAO, author and description over UDP RREF byte arrays at 1 Hz.
-It requires two complete matching identity reads; unknown identity never defaults to
-an acrobatic session. The console shows the detected aircraft and selected mode.
+Start X-Plane manually and double-click **Start A320 Landing Challenge.command**,
+which launches both aircraft modes. Alternatively run:
 
-| Detected aircraft | Flow | A/C Model | Dataset names |
-| --- | --- | --- | --- |
-| ToLiss Airbus | Automatic landing capture, first compression +5 seconds, pause, then wait for a reset to 3000 ft MSL and unpause | Airbus A320 | A320_Landing_Challenge_NNN |
-| Any other aircraft | Operator-started 5-second countdown, 60-second flight, warning, pause, finalize | Marple Acrobatic | Marple_Acrobatic_NNN |
+```sh
+python3 start_xplane_service.py --sample-mode low
+```
 
-ToLiss is matched by its brand in the author/description, or the installed aircraft's
-`Gliding Kiwi` author plus an Airbus ICAO code. The installed A319 identifies itself
-this way; it retains the user-requested **Airbus A320** metadata label for the challenge.
-ICAO A320 alone does not incorrectly classify other vendors as ToLiss.
+The default uses **programmatic RREF subscriptions only**. Leave all X-Plane Data
+Output network checkboxes off. The simulator's UDP command/RREF interface must
+still be reachable (normally `127.0.0.1:49000`). `--host` is the simulator computer's
+address, not an output destination. No FlyWithLua or AviTab plugin is required.
+The recorder does not enable DATA output or change its destination in this mode.
 
-At the landing cutoff, the pause request is sent before waiting for cloud uploads
-and finalization. In the default console this is independent of upload latency.
-Operator stop/quit, resets and aircraft changes do not request a landing pause.
-
-Both modes use the existing `X-Plane Fair Live` stream, separated by dataset names and
-metadata. Their counters are independent. Departure Airport remains LEPA and Flight
-Type remains Simulator Session. An aircraft change or unavailable identity ends the
-current capture without pausing the newly loaded aircraft; its dataset finishes before
-the next aircraft's metadata is used. Identity detection runs separately from numeric
-telemetry, so identity bytes do not become hundreds of extra Marple signals.
-
-For **any non-ToLiss aircraft**:
-
-- Press **S** to start recording and pushing data. The console waits for fresh,
-  unpaused, non-replay flight telemetry, then counts down five seconds while preparing
-  the Marple dataset. Slow cloud setup may extend preparation.
-- X-Plane receives **START** via UDP ALRT, then the 60-second recording begins.
-- At 50 seconds it receives **10 seconds to go**.
-- At 60 seconds recording stops. The recorder requests a pause only if fresh
-  telemetry says the simulator is not already paused, then checks for confirmation.
-- Pending samples finish uploading. The dataset is finalized and cold storage is
-  verified/repaired from the local journal. The console shows completion or an error.
-- Set up and unpause the next flight, then press **S** again. There is no automatic
-  3000-foot reset trigger in timed mode.
-- **X** stops and saves early. **Q** (or Ctrl+C) stops safely, waits for finalization,
-  and exits. The automatic pause applies to the timed end; X/Q do not pause the sim.
-
-The timer measures **60 wall-clock seconds**, including manual pauses and dialogs.
-Dismiss alerts promptly. ALRT and pause packet construction have been checked against
-the installed simulator protocol/commands and unit tested; their actual presentation
-and behavior still need a flight test because X-Plane was closed during development.
-UDP commands are not acknowledged directly. A missing pause confirmation is reported;
-the recorder never blindly toggles pause again. Recording stops regardless.
-
-The last full selection produced 480 telemetry signals. The selection is controlled
-by X-Plane's network-output checkboxes plus the recorder's 26 core RREF signals.
-The table above defines the two profiles.
-
-## Reducing signals
-
-Uncheck unwanted groups in **X-Plane Settings → Data Output → network/UDP output**.
-The recorder automatically uploads only the DATA fields it actually receives; it
-does not re-enable groups or fill missing fields with old values. Its signal
-dictionary describes possible fields and is not a fixed upload list.
-
-The 26 core signals are separately requested through RREF at 10 Hz, independently
-of those checkboxes. They include altitude, gear compression, ground state, pause
-and replay state. Aircraft identity is also requested separately and is not sent
-to Marple as numeric signals. Landing detection, the 3000-ft reset watcher and the
-timed session flow therefore continue to work when optional DATA groups are disabled.
-
-The previous selection contained 454 optional DATA fields plus 26 core signals.
-Keeping 20% of those optional fields gives approximately 117 total signals. For
-roughly 100 total, keep about 74 optional fields. Each checkbox selects a group with
-up to eight populated fields, so percentages of checkboxes are only an approximation.
-
-For a clean comparison, stop/save with **Q**, wait for finalization, change the
-checkboxes, then restart the recorder and begin a new flight. Changes also take
-effect while running, but previously captured signals stay in that flight and the
-console's **Signals seen** count is cumulative for the service run. Restarting makes
-the count reflect the reduced selection. Existing datasets are preserved.
-
-Fewer fields reduce upload size, storage work and potential restoration uploads.
-This can improve responsiveness, but does not guarantee one-second updates: the
-recorder still applies request pacing, and HTTP latency contributes to the interval.
-
-## Viewing status inside X-Plane
-
-The current console runs in Terminal. Standard AviTab does not embed that terminal.
-The separate [AviTab Browser add-on](https://github.com/rswilem/avitab-browser)
-documents X-Plane 11 and 12 support and could display a local web status/control
-page. This would require adding a web adapter to the recorder and checking the
-add-on with the installed aircraft/platform; it is not implemented here.
-
-Another option is a FlyWithLua floating window that reads recorder status and sends
-start/stop commands. The installed FlyWithLua includes floating-window examples.
-That integration also requires implementation; ordinary UDP recording needs no plugin.
-
-## Upload pacing and records
-
-The server returned `Rate limit exceeded: 1 per 1 second` even with 50 signals.
-The recorder therefore waits at least **1.05 seconds after an append response** before
-sending another append, including the final batch. It batches intervening samples
-without reducing their sampling frequency. Real upload intervals include HTTP latency
-and can exceed one second. Changing signal count alone does not remove this limit.
-
-Timers, simulator commands and raw UDP capture run independently from blocking cloud
-requests. Each session saves both a controller journal (`session-NNN.jsonl`) and the
-uploader journal (`flight-NNN.jsonl`), with manifests beside them. `session.log` records
-operator/connection messages. Local journals remain available on cloud failures.
-
-Benchmarks are explicitly labeled recorded-flight replays under the separate Marple
-stream **X-Plane Throughput Tests**, with reports under `outputs/xplane/benchmarks/`.
-They measure ingestion responses, pacing and cold-storage counts; they do not measure
-Marple Insight browser rendering or simulator FPS.
-
-## Original landing behavior
-
-Run `python3 start_xplane_service.py --landing-mode` for the legacy console. It also
-uses the 5-second post-compression cutoff, UDP pause request and 3000-foot reset watcher.
-The historical setup and validation details below apply to that mode.
-
-# Legacy landing mode and previous flight validation
-
-One Marple **realtime datastream**, `X-Plane Fair Live`, contains one **dataset per flight**.
-Ending a flight flushes its last batch, calls `dataset.cool()`, and verifies `FINISHED`.
-The next flight gets a new dataset; finished datasets are never appended again.
-
-Every flight dataset has these metadata fields:
-
-| Field | Value |
+| Control | Action |
 | --- | --- |
-| A/C Model | Airbus A320 |
-| Departure Airport | LEPA |
-| Flight Type | Simulator Session |
+| S | Start a timed session on a non-ToLiss aircraft |
+| X | Stop and save early |
+| R | Toggle LOW / HIGH for the **next flight** |
+| Q / Ctrl+C | Stop safely and wait for finalization |
 
-Names are `A320_Landing_Challenge_001`, `A320_Landing_Challenge_002`, and so on.
-Numbering continues across recorder restarts using both existing Marple names and
-`outputs/xplane/challenge-sequence.json`. A reserved number is not reused after a
-failed creation attempt, so failures can leave a gap. Local-only tests have a separate
-counter. The two completed test flights are now 001 (1163) and 002 (1165).
+The console displays active Marple sample rate and next-flight selection. A flight
+keeps its original rate so low/high comparisons use separate datasets. You can
+also select `--sample-mode high` at startup. Metadata records the selected live
+sample rate and the requested local capture rate.
 
-## Start on this Mac
+## Rates and data paths
 
-**FlyWithLua is not required.** The recorder is a separate Python process using
-X-Plane's built-in RREF and DATA UDP interfaces. Existing FlyWithLua scripts can remain installed.
+| Mode | Local RREF capture / detection | Samples sent to Marple |
+| --- | --- | --- |
+| LOW (default) | Requested 10 Hz | At most one sample per signal per 1-second bucket |
+| HIGH | Requested 10 Hz | At most one sample per signal per 0.1-second bucket |
 
-1. In Finder, double-click **Start A320 Landing Challenge.command** in this project.
-2. Start X-Plane yourself and load the A320 at LEPA. Either startup order works:
-   the launcher waits for telemetry if the simulator is not yet ready.
-3. Keep the Terminal window open while flying. The recorder captures the landing,
-   ends 5 seconds after initial gear compression, requests a pause, and waits for your
-   reset to 3,000 ft. Unpause after resetting to begin the next flight.
-4. To stop, press **Ctrl+C** in that Terminal and wait for finalization to complete.
+Actual simulator delivery can be lower than requested (for example about 9 Hz).
+Sampling retains each selected value's original receiver timestamp and never fills
+missing signals with old values. Different signals arriving in separate packets
+are sampled independently. HTTP uploads batch those selected samples; they are
+paced at least 1.05 seconds **after the previous response**, so 1 Hz signal sampling
+does not promise one HTTP call or screen update per second.
 
-The launcher runs one instance at a time and loads this project's existing `.env.local`.
-It does not install a login/background service or start X-Plane automatically.
-To launch from Terminal instead, run this from the project folder:
+The main console writes the full received, enriched telemetry to `session-NNN.jsonl`
+and the selected upload data to `flight-NNN.jsonl`. Thus LOW preserves fine local
+landing detail while reducing cloud volume. `packets.jsonl` contains original UDP
+packets including identity replies. The legacy console keeps full detail in this
+raw packet journal rather than a separate decoded session journal.
 
-```sh
-python3 start_xplane_service.py
-```
+Subscription requests are paced on their own thread. They do not block the
+receiver's timestamps or touchdown processing. Aircraft identity uses separate
+1 Hz character subscriptions and is never expanded into numeric Marple signals.
 
-If the aircraft is already on the ground after a demonstration and the next action
-will be a reset, use `python3 start_xplane_service.py --landing-mode --wait-for-reset`.
+## Curated landing-report signals
 
-## Verified connection
+The set contains **52 standard RREF channels**, **10 additional ToLiss channels**
+when that aircraft is confirmed, and up to **5 derived channels**: normally up to
+57 signals for another aircraft or 67 for ToLiss. Only returned/derived values are
+uploaded. Engine 2 and jet N1 fields are meaningful only on appropriate aircraft.
 
-The local simulator is X-Plane **11.55r2**, reachable at `127.0.0.1:49000`.
-Its RREF UDP interface successfully returned all 26 requested signals at approximately
-10 Hz, including ten landing-gear compression channels. The first sample was paused
-and airborne. RREF needs no output checkboxes. The additional DATA signals use the network output checkboxes and a destination configured by the recorder; no plugins are needed.
+| Report purpose | Signals |
+| --- | --- |
+| GPS ground track | Latitude, longitude, true ground track, ground speed (m/s and kt), distance covered |
+| Primary flight display | IAS, TAS, pitch, roll, true/magnetic heading, indicated altitude, geometric MSL altitude (m/ft), AGL (m/ft), indicated and true vertical speed (fpm), altimeter setting |
+| Requested power and engine response | Throttle levers 1/2, flight-model engine 1 throttle setting, actual N1 1/2 |
+| Configuration | Requested flap handle, actual flap deployment, speedbrake handle and actual deployment, gear handle |
+| Landing event | Ground contact, normal G, ten gear compression slots, simulator pause/replay/time |
+| Standard guidance | NAV1 lateral/vertical deviation in dots, horizontal/vertical validity, tuned frequency, FD mode and pitch/roll cues |
+| Conditions | Effective wind direction/speed and aircraft mass |
+| ToLiss-specific | FD1 and AP1/AP2 engagement, raw autothrust mode, raw ILS1 LOC/GS, captain LOC/GS/LS display flags, flap lever ratio |
 
-`192.168.0.1` was the configured **output destination**, not the simulator address.
-For a remote simulator, `--host` must be the IP of its computer, and UDP replies
-must be able to reach the recorder. On this Mac, use the loopback address above.
+Names, units, descriptions and dataref paths are in `xplane_live.py` and
+`xplane_report_signals.py`. Every dataset receives signal descriptions and each
+flight saves `flight-NNN.signals.json` with the observed definitions.
 
-## Landing rule
+Important distinctions for a future PDF report:
 
-1. Start recording when telemetry first arrives.
-2. Arm landing detection after observing at least one second airborne, with fresh
-   unpaused/non-replay status. Initial runway compression does not trigger it.
-3. The first measured compression above **0.1 mm** on any gear latches touchdown.
-   This small threshold excludes numeric noise; verify it with the chosen aircraft.
-4. End **5 wall-clock seconds** after that first compression and request a pause
-   using UDP `CMND sim/operation/pause_toggle` (the normal P-key pause action). Bounces do not restart
-   the countdown. At 10 Hz, touchdown detection is limited by approximately 0.1-second
-   sampling plus UDP/network delay. The tail also expires if the sim is paused; no toggle is sent if fresh telemetry
-   says it is already paused. Missing/stale pause state or a send failure is logged
-   for manual pausing, while recording still stops. The default console checks
-   subsequent pause telemetry and does not blindly retry the toggle.
-5. In continuous mode, discard intervening samples from flight datasets while waiting
-   for the next simulator reset. Raw UDP packets continue to be journaled locally.
-6. After landing, an altitude jump of at least 1,000 ft arms a three-second reset
-   window. An airborne sample within **3,000 +/-150 ft MSL** arms the next flight;
-   the default console waits for fresh unpaused telemetry before recording.
-   This accommodates an actual observed reset: a transient 22,720-ft packet followed
-   by 3,035 ft. A gradual climb through 3,000 ft does not trigger it. Set another target
-   with `--reset-altitude-ft`. If resetting before the landing tail completes, the old
-   flight ends immediately with that reason, so the flights remain separate.
-7. `--auto-reset` optionally also watches backwards jumps in the flight timer. The
-   tested repositioning did **not** reset that timer, so altitude is the default fair trigger.
+- A throttle lever request is not delivered thrust. N1 is engine response, not
+  requested power. ToLiss autothrust can separate lever position from engine output.
+- Geometric altitude and barometric indicated altitude have different meanings.
+  True sink rate is derived from vertical velocity, separately from indicated VVI.
+- `distance_covered_nm` integrates ground speed against simulator flight time from
+  the recording's start. Pauses, replay, backwards time and gaps over two seconds
+  are excluded. It is estimated horizontal distance, not runway distance or
+  distance to threshold, and resets with every session.
+- RREF returns float32 even for latitude/longitude. This is adequate for a demo map,
+  but do not promise precision runway-centerline or touchdown-position measurements.
+- NAV1 deviations require valid guidance and an actual ILS tuning. A zero does not
+  prove a centered ILS. A custom aircraft may use its own guidance implementation.
+- ToLiss raw ILS scale/sign and invalid-value rules are not yet verified. An observed
+  `-10` must not be interpreted as a dot deviation. Its display flags are preserved
+  separately; selecting LS display alone does not prove reception. Do not compute
+  an ILS score until these semantics have been checked against the cockpit.
+- Flap ratios are not universal Airbus CONF numbers. Autothrust enum codes also
+  remain raw until their mapping is verified.
 
-## Run
+At touchdown the main console stores a fresh speed, sink-rate, attitude, position
+and configuration snapshot in the session manifest, even in LOW mode. This data
+collection prepares a future landing PDF; the service does **not** yet generate or
+score a PDF report automatically. Such a report should also identify the landing
+runway/threshold, account for aircraft limits, and label missing or invalid inputs.
 
-Local connection check (no Marple writes):
+Standard definitions were checked against the installed X-Plane 11.55
+`Resources/plugins/DataRefs.txt` and [Laminar's dataref documentation](https://developer.x-plane.com/datarefs/).
+ToLiss custom names were checked against the installed A319 v1.11 plugin and
+read-only UDP responses. These references are aircraft/version-specific; see
+[ToLiss support](https://toliss.com/pages/support). No aircraft files are distributed.
 
-```sh
-python3 xplane_live.py --seconds 15
-```
+## Aircraft routing and flight lifecycle
 
-One short live-ingestion/finalization test:
+The recorder requires two complete matching ICAO/author/description reads. Missing
+identity never defaults to the non-ToLiss mode. ToLiss is identified by its brand,
+or `Gliding Kiwi` author plus Airbus ICAO. Custom subscriptions are enabled only
+for a confirmed ToLiss and cancelled when that identity is lost or changed.
 
-```sh
-python3 xplane_live.py --live --seconds 20
-```
+| Aircraft | Flow | Metadata A/C Model | Dataset name |
+| --- | --- | --- | --- |
+| ToLiss Airbus | Automatic landing capture; compression +5 s; pause; wait for reset | Airbus A320 | A320_Landing_Challenge_XXX |
+| Any other aircraft | S → 5 s preparation → 60 s flight → pause | Marple Acrobatic | Marple_Acrobatic_XXX |
 
-Fair mode, landing cutoff and repeated flights:
+Both use the `X-Plane Fair Live` datastream, independent sequence counters,
+Departure Airport `LEPA`, and Flight Type `Simulator Session`. The installed A319
+retains the requested `Airbus A320` metadata label; actual ICAO and description
+are recorded separately. Names are reserved locally before network creation;
+gaps can occur on failed attempts. Do not run multiple writers on different
+computers against this shared stream at once.
 
-```sh
-python3 xplane_live.py --live --landing --continuous --seconds 0
-```
+Landing detection arms after one observed second airborne with fresh running,
+non-replay telemetry. The **first gear compression over 0.1 mm** latches touchdown;
+bounces do not restart the timer. **Five wall-clock seconds later** recording ends
+and a UDP `CMND sim/operation/pause_toggle` request is sent before cloud finalization.
+No toggle is sent when already paused or pause state is stale. The main console
+checks subsequent telemetry for confirmation and never blindly retries. Failed or
+unconfirmed pauses are logged for manual action; recording still stops.
 
-Omit `--live` to validate the complete flight sequence locally first. Ctrl+C ends
-the active recording and attempts finalization. If reset detection is unavailable,
-run one flight at a time with `--live --landing --seconds 0`, then rerun after resetting.
-The program never moves the aircraft or triggers a simulator reset. If starting the
-recorder while already landed after a demonstration, add `--wait-for-reset`.
+After a landing, an upward altitude jump of at least 1000 ft arms a three-second
+reset window. An airborne sample at 3000 ±150 ft MSL marks the next flight ready;
+the main console waits for fresh unpaused telemetry. Reset and unpause manually.
+An aircraft change ends the old capture before applying new metadata. X/Q and
+resets do not trigger the landing pause command.
 
-## Credentials and tested results
+Timed mode sends `START` via ALRT, then `10 seconds to go` at 50 seconds. Its
+60-second timer includes simulator pauses and dialogs: dismiss alerts promptly.
+It requests a pause at the deadline and finalizes, then waits for S again.
 
-The existing `xplane_marple.get_sdk_db()` loads `.env.local`. `MARPLE_DB_API_TOKEN` takes
-precedence over `MARPLE_API_TOKEN`; an already-exported environment value takes precedence
-over the file. Keep tokens out of tracked source and chat.
+## Finalization and recovery
 
-Realtime access was enabled during testing. Stream **18**, `X-Plane Fair Live`, is ready.
-Both test flights have been uploaded and finalized:
+The uploader drains selected samples, appends the final batch, calls `cool()`,
+waits for `FINISHED`, and compares cold-storage signal counts and first/last
+receiver timestamps with `flight-NNN.jsonl` through Trino. Missing/incomplete
+signals are restored from **that sampled upload journal**, not the full-rate
+session journal, so repair does not silently turn LOW into HIGH.
 
-- **1163**, `A320_Landing_Challenge_001`: 3,299 samples per signal,
-  26 signals, 85,774 data points verified in cold storage. Last sample was 14.951 seconds
-  after first gear compression, just before the 15-second boundary.
-- **1165**, `A320_Landing_Challenge_002`: recovered from the real raw
-  journal after the initial altitude watcher missed the transient. The corrected watcher
-  recognizes the reset at 3,035 ft when replayed against those packets. It contains
-  296 captured sample packets and ends 14.979 seconds after first compression.
-- **1161**, `xplane-landing-validation`, is a finalized **partial connectivity test**,
-  not the complete landing. Its metadata identifies it as incomplete diagnostic data.
+The full-rate local journal remains available for a future detailed report.
+A failed or uncertain append is not blindly retried. Cooling/verification failure
+is shown as an error rather than confirmed completion. Do not close the terminal
+until finalization finishes. Credentials are loaded from `.env.local` and excluded
+from Git, as are all recordings under `outputs/`.
 
-The initial watcher bug was fixed and tested against the recorded reset; a subsequent
-fresh simulator reset has not yet been tested. These results describe the initial test; subsequent runs are recorded in the per-flight manifests.
+Recovery: `xplane_verify.py CAPTURE --dataset-id ID --repair` must be used with that
+dataset's own `flight-NNN.jsonl`. `xplane_push_capture.py` supports uploading an
+existing capture to a new empty dataset. The benchmark scripts replay recorded
+captures into a separate `X-Plane Throughput Tests` stream and do not control the sim.
 
-## Data and failure handling
+## Legacy options and compatibility
 
-All artifacts live in `outputs/xplane/<UTC-run-id>/`:
+`--include-data` explicitly opts into the old checkbox-selected DATA feed and
+configures its destination to this receiver on port 49005. It can add hundreds of
+signals and is unnecessary for the curated report set. The old DATA dictionary is
+retained so historical recordings and recovery remain usable.
 
-- `signals.json`: signal names, exact datarefs, and units.
-- `packets.jsonl`: raw UDP packets with receiver UTC and monotonic timestamps.
-- `flight-NNN.jsonl`: decoded samples assigned to each flight.
-- `flight-NNN.json`: dataset ID, state, confirmed upload count, touchdown/cutoff timestamps,
-  and end reason where available.
+`--landing-mode` selects the legacy console, with the same 5-second landing rule
+and startup `--sample-mode low|high`, but no interactive R key. Its cloud calls are
+synchronous; use the default console for timing independent of upload latency.
+`--landing-mode --wait-for-reset` attaches after a completed landing.
 
-RREF requests have a five-byte header, followed by little-endian 32-bit frequency,
-32-bit request index, and a 400-byte null-padded dataref name. Replies have the same
-header length, followed by pairs of 32-bit index and float. An index belongs to this
-recorder's signal list, avoiding X-Plane's version-dependent DATA group mappings.
-Subscriptions are canceled on clean exit. RREF returns float32 values even for double
-datarefs, so latitude/longitude are suitable for this demo rather than precision survey work.
-
-Each signal retains its receive timestamp; missing values are not forward-filled.
-Live uploads are batched every two seconds to reduce API request load.
-Raw capture runs separately from HTTP uploads. UDP delivery itself is not guaranteed.
-An uncertain append is marked `APPEND_UNCONFIRMED` and is not blindly retried. The
-recorder continues writing locally. At flight end it cools the dataset and verifies
-each signal's sample count and first/last timestamps through Trino cold storage.
-Missing or incomplete signals are replaced from the authoritative local journal using
-the SDK, then checked again. This also handles the two missing channels observed in
-the first completed import. A cooling timeout leaves the dataset ID and last known
-state in the manifest; do not treat it as confirmed completion. If initial Marple
-dataset setup fails, the complete local capture remains available for a later upload.
-
-`xplane_push_capture.py` can upload a captured flight to a fresh, empty live dataset.
-Use `--follow` to follow a local recording until its landing cutoff. Its journal guards
-against accidental repeat uploads; inspect any uncertain batch before resuming.
-`xplane_verify.py CAPTURE --dataset-id ID --repair` verifies a finalized dataset and
-restores incomplete signals from that capture when needed. Use it only with that
-capture's own dataset.
-
-Protocol and units were checked against the simulator's bundled
-`Instructions/X-Plane SPECS from Austin/Exchanging Data with X-Plane.rtfd`
-and `Resources/plugins/DataRefs.txt`. SDK lifecycle was checked against installed
-`marpledata` 3.4.0.dev1. This implementation has not yet been verified on X-Plane 10.
-
-## Expanded checkbox-selected UDP capture (X-Plane 11.55)
-
-The service receives both RREF (the original 26 signals, including landing detection)
-and DATA (the groups selected for network output in X-Plane). It sets the DATA
-destination to this computer on UDP port 49005 every five seconds. Keep the network
-output checkboxes enabled; Disk output and FlyWithLua are not required.
-
-The inspected selection contains 66 groups and 454 populated DATA fields. Together
-with RREF this produces 480 distinct signals. Additional selections are captured
-automatically. Unknown groups/slots receive a stable raw name and an explicit
-unverified description until a mapping is added. Blank -999 slots and nonfinite
-values are omitted; original packet bytes remain in the journal.
-
-`xplane_signals.py` contains the dictionary. DATA names use `data_` plus descriptive
-snake_case names, such as `data_engine_1_n1_pct`. The prefix distinguishes their
-independent sample times from RREF channels. Gear indices remain zero-based; engine
-indices are one-based. All eight engine/battery slots are retained, including unused
-slots with simulator defaults. These do not imply the aircraft has eight engines.
-
-Each signal receives its description and unit in Marple before its first append.
-Every flight also saves `flight-NNN.signals.json` with descriptions and provenance.
-Descriptions were researched in Laminar's online DATA table and developer articles,
-then slot order was checked against the output labels bundled in the installed
-11.55 executable. The online table itself describes 10.30 and is incomplete.
-Aircraft-configured fuel quantities/flow, torque and temperature scales are labeled
-`aircraft-configured`; undocumented thrust-vector, cyclic and wing-force units are
-`unspecified`. Raw values are preserved without speculative conversion.
-
-Sources:
-- https://www.x-plane.com/kb/data-set-output-table/
-- https://developer.x-plane.com/datarefs/
-- https://developer.x-plane.com/article/movingtheplane/
-- https://developer.x-plane.com/article/using-the-correct-wing-datarefs/
-- https://developer.x-plane.com/article/vacuum-systems/
-- https://developer.x-plane.com/article/preconfigured-autopilots-and-other-autopilot-changes-in-11-30/
-
-Start as before by double-clicking `Start A320 Landing Challenge.command`. Stop with
-Ctrl+C and wait for finalization. The current first-compression cutoff is 5 seconds
-with a pause request; the 3000-ft reset watcher, numbering and metadata still apply.
-
-Expanded-capture validation on 2026-09-22 UTC: flight 004 (dataset 1169)
-received 454 additional channels from 2,992 inspection packets, totaling 1,358,368
-additional samples. Every channel's count and first/last timestamp matched cold
-storage. These extra channels begin partway through flight 004 when inspection
-started; earlier measurements were not fabricated. Its original 26 channels also
-passed verification. The maintenance restart began flight 005 (dataset 1170), with
-480 signals live and all 480 units/descriptions confirmed through the Marple API.
-The packet, landing/reset, metadata, naming and bulk recovery suite has 24 passing tests.
-Bulk recovery avoids issuing hundreds of individual signal-poll requests.
-
-Aircraft-routing validation: 43 automated tests pass, covering both profiles,
-fragmented/out-of-order identity packets, missing/stale identity, metadata forwarding,
-landing cutoff/reset, no 60-second timer for ToLiss, and switching aircraft without
-relabeling the previous capture. The console was smoke tested while X-Plane was
-closed. Live aircraft identity and ALRT/pause presentation still need simulator validation.
+Tested with X-Plane 11.55r2 on macOS and Python 3.13; X-Plane 10 is unverified.
+The project uses `fcntl` and `curses`; native Windows support is not implemented.

@@ -96,6 +96,7 @@ def decode_data(packet):
 
 
 def signal_definitions(names, rrefs):
+    from xplane_report_signals import EXTRA_DESCRIPTIONS, report_definition
     refs = {name:(ref,unit) for name,ref,unit in rrefs}
     descriptions = {
         'flight_time_s':'Elapsed simulator flight time.', 'paused':'Simulator pause flag: 1 paused, 0 running.',
@@ -105,10 +106,14 @@ def signal_definitions(names, rrefs):
         'latitude_deg':'Aircraft geographic latitude.', 'longitude_deg':'Aircraft geographic longitude.',
         'pitch_deg':'Aircraft pitch Euler angle.', 'roll_deg':'Aircraft roll Euler angle.',
         'heading_true_deg':'Aircraft heading relative to true north.', 'normal_g':'Normal acceleration load in aircraft axes.',
-        'throttle_ratio':'Actual throttle fraction for engine 1.', 'on_ground':'At least one landing gear touching the ground: 1 yes, 0 no.'}
+        'throttle_ratio':'Engine 1 throttle setting exposed by the flight model; not a measurement of thrust.', 'on_ground':'At least one landing gear touching the ground: 1 yes, 0 no.'}
+    descriptions.update(EXTRA_DESCRIPTIONS)
     result=[]
     for name in sorted(names):
-        if name in BY_NAME:
+        special = report_definition(name)
+        if special is not None:
+            result.append(special)
+        elif name in BY_NAME:
             result.append(BY_NAME[name])
         elif name in refs:
             ref,unit=refs[name]

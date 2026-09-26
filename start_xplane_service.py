@@ -14,6 +14,8 @@ def main():
     parser.add_argument("--port", type=int, default=49000)
     parser.add_argument("--landing-mode", action="store_true", help="Use the original continuous landing challenge instead of automatic aircraft routing")
     parser.add_argument("--local-only", action="store_true", help="Console without Marple uploads")
+    parser.add_argument("--sample-mode", choices=['low', 'high'], default='low', help="Live samples: low 1 Hz / high 10 Hz")
+    parser.add_argument("--include-data", action="store_true", help="Opt in to legacy DATA checkbox capture")
     parser.add_argument("--wait-for-reset", action="store_true", help="Use if the plane has already completed a landing")
     args = parser.parse_args()
     os.chdir(ROOT)
@@ -31,11 +33,13 @@ def main():
     lock.write(str(os.getpid()) + "\n")
     lock.flush()
     if args.landing_mode:
-        command = [sys.executable, "-u", str(ROOT / "xplane_live.py"), "--live", "--landing",
+        command = [sys.executable, "-u", str(ROOT / "xplane_live.py"), "--landing",
                    "--continuous", "--seconds", "0", "--wait-seconds", "0",
                    "--host", args.host, "--port", str(args.port)]
         if args.wait_for_reset:
             command.append("--wait-for-reset")
+        if not args.local_only:
+            command.append("--live")
     else:
         if args.wait_for_reset:
             parser.error("--wait-for-reset requires --landing-mode")
@@ -43,6 +47,9 @@ def main():
                    "--host", args.host, "--port", str(args.port)]
         if args.local_only:
             command.append("--local-only")
+    command += ['--sample-mode', args.sample_mode]
+    if args.include_data:
+        command.append('--include-data')
     print("Opening Flight Session Recorder…", flush=True)
     os.execv(sys.executable, command)
 

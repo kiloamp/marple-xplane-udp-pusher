@@ -3,7 +3,7 @@
 Protocol: X-Plane 11/Instructions/X-Plane SPECS from Austin/
 Exchanging Data with X-Plane.rtfd. Units: Resources/plugins/DataRefs.txt.
 Landing completion requests a pause over UDP; no simulator reset commands are sent.
-The DATA destination is configured to this receiver; the operator selects output groups.
+Default capture uses programmatic RREF subscriptions only. Legacy DATA capture is opt-in.
 """
 from __future__ import annotations
 
@@ -23,7 +23,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from xplane_signals import decode_data, signal_definitions
-from xplane_aircraft import AircraftIdentity, subscribe as subscribe_identity
+from xplane_aircraft import AircraftIdentity, aircraft_mode, subscribe as subscribe_identity
+from xplane_report_signals import REPORT_RREFS, TOLISS_RREFS, TOLISS_NAMES
+from xplane_sampling import LiveSampler, ReportTelemetry
 
 FLIGHT_METADATA = {
     "A/C Model": "Airbus A320",
@@ -101,6 +103,7 @@ SIGNALS = [
     ("on_ground", "sim/flightmodel/failures/onground_any", "boolean"),
 ]
 SIGNALS += [(f"gear_{i}_compression_m", f"sim/flightmodel2/gear/tire_vertical_deflection_mtr[{i}]", "m") for i in range(10)]
+SIGNALS += [(name, ref, unit) for name, ref, unit, _ in REPORT_RREFS + TOLISS_RREFS]
 
 
 class LandingCut:
@@ -195,41 +198,64 @@ def reset_detected(previous: float | None, current: float | None) -> bool:
 class Receiver:
     """Keep draining UDP while an HTTP upload is in progress; journal raw packets."""
 
-    def __init__(self, host: str, port: int, hz: int, folder: Path, data_port=49005):
+    def __init__(self, host: str, port: int, hz: int, folder: Path, data_port=49005, include_data=False):
         self.target = (socket.gethostbyname(host), port)
         self.hz = hz
         self.events = queue.Queue(maxsize=20000)
         self.stop = threading.Event()
         self.failure = None
         self.identity = AircraftIdentity()
+        self.toliss_active = False
+        self.include_data = include_data
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("0.0.0.0", 0))
-        self.data_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.data_sock.bind(("0.0.0.0", data_port))
-        # Route lookup chooses the interface reachable by the simulator.
-        route = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        route.connect(self.target)
-        self.data_address = route.getsockname()[0]
-        route.close()
-        self.data_port = self.data_sock.getsockname()[1]
+        self.data_sock = None
+        self.data_port = data_port
+        if include_data:
+            self.data_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.data_sock.bind(("0.0.0.0", data_port))
+            route = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            route.connect(self.target)
+            self.data_address = route.getsockname()[0]
+            route.close()
+            self.data_port = self.data_sock.getsockname()[1]
         self.journal = (folder / "packets.jsonl").open("x", buffering=1)
         self.thread = threading.Thread(target=self.run, daemon=True)
+        self.subscription_thread = threading.Thread(target=self.maintain_subscriptions, daemon=True)
 
     def subscribe(self, hz):
-        for index in range(len(SIGNALS)):
-            self.sock.sendto(subscription(index, hz), self.target)
+        toliss = bool(hz and aircraft_mode(self.identity.snapshot(time.monotonic())) == 'landing')
+        for index, (name, _, _) in enumerate(SIGNALS):
+            if name not in TOLISS_NAMES or toliss:
+                self.sock.sendto(subscription(index, hz), self.target)
+            elif self.toliss_active:
+                self.sock.sendto(subscription(index, 0), self.target)
+            time.sleep(.003)
         subscribe_identity(self.sock, self.target, 1 if hz else 0)
+        self.toliss_active = toliss
 
-    def run(self):
+    def maintain_subscriptions(self):
+        """Pace requests without delaying receive timestamps or touchdown detection."""
         try:
             last_subscribe = 0.0
             while not self.stop.is_set():
-                if time.monotonic() - last_subscribe > 5:
+                toliss = aircraft_mode(self.identity.snapshot(time.monotonic())) == 'landing'
+                if time.monotonic() - last_subscribe > 5 or toliss != self.toliss_active:
                     self.subscribe(self.hz)
-                    self.sock.sendto(b"ISE4\0" + struct.pack("<i16s8si", 64,
-                        self.data_address.encode(), str(self.data_port).encode(), 1), self.target)
+                    if self.include_data:
+                        self.sock.sendto(b"ISE4\0" + struct.pack("<i16s8si", 64,
+                            self.data_address.encode(), str(self.data_port).encode(), 1), self.target)
                     last_subscribe = time.monotonic()
-                readable, _, _ = select.select([self.sock, self.data_sock], [], [], 0.25)
+                self.stop.wait(.1)
+        except Exception as exc:
+            self.failure = type(exc).__name__
+
+    def run(self):
+        try:
+            self.subscription_thread.start()
+            while not self.stop.is_set():
+                sockets = [self.sock] + ([self.data_sock] if self.data_sock else [])
+                readable, _, _ = select.select(sockets, [], [], 0.25)
                 if not readable:
                     continue
                 packet, source = readable[0].recvfrom(65535)
@@ -240,7 +266,14 @@ class Receiver:
                 self.identity.observe(packet, mono)
                 self.journal.write(json.dumps({"time": now, "monotonic": mono, "packet_hex": packet.hex()}) + "\n")
                 try:
-                    values = decode_data(packet) if packet[:4] == b"DATA" else decode(packet)
+                    if packet[:4] == b"DATA":
+                        if not self.include_data:
+                            continue
+                        values = decode_data(packet)
+                    else:
+                        values = decode(packet)
+                        if not self.toliss_active:
+                            values = {k: v for k, v in values.items() if k not in TOLISS_NAMES}
                 except ValueError:
                     continue
                 if values:
@@ -251,11 +284,14 @@ class Receiver:
     def close(self):
         self.stop.set()
         self.thread.join(timeout=3)
+        if self.subscription_thread.ident is not None:
+            self.subscription_thread.join(timeout=3)
         try:
             self.subscribe(0)
         finally:
             self.sock.close()
-            self.data_sock.close()
+            if self.data_sock:
+                self.data_sock.close()
             self.journal.close()
 
 
@@ -399,6 +435,8 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=49000)
     parser.add_argument("--data-port", type=int, default=49005, help="Local port for selected DATA output groups")
+    parser.add_argument("--include-data", action="store_true", help="Opt in to legacy checkbox-selected DATA capture; normally leave disabled")
+    parser.add_argument("--sample-mode", choices=['low', 'high'], default='low', help="Marple sampling: low 1 Hz / high 10 Hz; local RREF detection remains at --hz")
     parser.add_argument("--flush-seconds", type=float, default=2, help="Live upload interval; keeps request rate below per-minute limits")
     parser.add_argument("--hz", type=int, default=10)
     parser.add_argument("--seconds", type=float, default=30, help="Capture duration from first packet; 0 means until Ctrl+C")
@@ -432,7 +470,7 @@ def main():
             raise ValueError("Selected Marple stream must be realtime")
         minimum_number = next_remote_number(stream.get_datasets())
         namespace = f"stream:{stream.id}"
-    receiver = Receiver(args.host, args.port, args.hz, folder, args.data_port)
+    receiver = Receiver(args.host, args.port, args.hz, folder, args.data_port, include_data=args.include_data)
     receiver.thread.start()
     print(f"Listening to {args.host}:{args.port} at {args.hz} Hz. Logs: {folder}. Ctrl+C ends and finalizes.", flush=True)
     flight = None
@@ -440,6 +478,8 @@ def main():
     first = None
     previous_timer = None
     latest_pause = (None, -math.inf)
+    sampler = LiveSampler(args.sample_mode)
+    report_telemetry = ReportTelemetry()
     started = time.monotonic()
     last_status = started
     reason = "duration"
@@ -511,8 +551,14 @@ def main():
             if flight is None:
                 number += 1
                 name = reserve_challenge_name(Path("outputs/xplane/challenge-sequence.json"), namespace, minimum_number)
-                flight = Flight(folder, number, stream, dataset_name=name)
-            flight.add(timestamp, values)
+                flight = Flight(folder, number, stream, dataset_name=name,
+                                metadata={**FLIGHT_METADATA, 'Live Sample Rate Hz': sampler.hz})
+                sampler = LiveSampler(args.sample_mode)
+                report_telemetry = ReportTelemetry()
+            enriched = report_telemetry.add(mono, values)
+            selected = sampler.select(mono, enriched)
+            if selected:
+                flight.add(timestamp, selected)
             if args.landing:
                 was_armed, previous_touchdown = landing.armed, landing.touchdown
                 landing.observe(mono, values)

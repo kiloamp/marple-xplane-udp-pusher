@@ -3,12 +3,14 @@ import re
 import socket
 import struct
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from xplane_signals import DATA, decode_data, signal_definitions
 from xplane_live import Flight, Receiver, SIGNALS
+from xplane_report_signals import TOLISS_NAMES, DERIVED
 
 
 def packet(group, values):
@@ -38,7 +40,7 @@ class DataTests(unittest.TestCase):
 
     def test_both_udp_protocols_and_raw_journal(self):
         with tempfile.TemporaryDirectory() as tmp:
-            receiver=Receiver('127.0.0.1',9,10,Path(tmp),data_port=0)
+            receiver=Receiver('127.0.0.1',9,10,Path(tmp),data_port=0,include_data=True)
             with patch.object(receiver,'subscribe'):
                 receiver.thread.start()
                 sender=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
@@ -68,6 +70,73 @@ class DataTests(unittest.TestCase):
             self.assertEqual(len(events[2][1]),8)
             self.assertEqual(len(json.loads(flight.path.with_suffix('.signals.json').read_text())),9)
             flight.file.close()
+
+    def test_programmatic_default_ignores_data_packets_and_does_not_set_output_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            receiver=Receiver('127.0.0.1',9,10,Path(tmp))
+            self.assertIsNone(receiver.data_sock)
+            with patch.object(receiver,'subscribe'):
+                receiver.thread.start()
+                sender=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+                try:
+                    target=('127.0.0.1',receiver.sock.getsockname()[1])
+                    sender.sendto(packet(41,[50]*8),target)
+                    sender.sendto(b'RREF\0'+struct.pack('<if',3,123),target)
+                    _,_,values=receiver.events.get(timeout=3)
+                    self.assertEqual(values,{'airspeed_kias':123})
+                    self.assertTrue(receiver.events.empty())
+                finally:
+                    receiver.close();sender.close()
+            self.assertIsNone(receiver.failure)
+
+    def test_toliss_subscriptions_are_gated_by_confirmed_aircraft_and_cancelled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            receiver=Receiver('127.0.0.1',9,10,Path(tmp))
+            original_socket=receiver.sock
+            receiver.sock=MagicMock()
+            try:
+                with patch.object(receiver.identity,'snapshot',return_value=None):receiver.subscribe(10)
+                sent=[struct.unpack('<ii400s',call.args[0][5:]) for call in receiver.sock.sendto.call_args_list]
+                self.assertFalse(any(ref.startswith(b'AirbusFBW/') for _,_,ref in sent))
+                receiver.sock.reset_mock()
+                with patch.object(receiver.identity,'snapshot',return_value={'icao':'A319','author':'Gliding Kiwi'}):receiver.subscribe(10)
+                sent=[struct.unpack('<ii400s',call.args[0][5:]) for call in receiver.sock.sendto.call_args_list]
+                self.assertEqual(sum(hz==10 and ref.startswith(b'AirbusFBW/') for hz,_,ref in sent),len(TOLISS_NAMES))
+                receiver.sock.reset_mock()
+                with patch.object(receiver.identity,'snapshot',return_value={'icao':'C172','author':'Laminar Research'}):receiver.subscribe(10)
+                sent=[struct.unpack('<ii400s',call.args[0][5:]) for call in receiver.sock.sendto.call_args_list]
+                self.assertEqual(sum(hz==0 and ref.startswith(b'AirbusFBW/') for hz,_,ref in sent),len(TOLISS_NAMES))
+            finally:
+                original_socket.close();receiver.journal.close()
+
+    def test_subscription_pacing_does_not_block_capture(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            receiver=Receiver('127.0.0.1',9,10,Path(tmp))
+            entered=threading.Event();release=threading.Event()
+            def slow_subscribe(hz):
+                if hz:
+                    entered.set();release.wait(3)
+            with patch.object(receiver,'subscribe',side_effect=slow_subscribe):
+                receiver.thread.start();sender=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+                try:
+                    self.assertTrue(entered.wait(1))
+                    sender.sendto(b'RREF\0'+struct.pack('<if',3,123),('127.0.0.1',receiver.sock.getsockname()[1]))
+                    _,_,values=receiver.events.get(timeout=1)
+                    self.assertFalse(release.is_set())
+                    self.assertEqual(values,{'airspeed_kias':123})
+                finally:
+                    release.set();receiver.close();sender.close()
+
+    def test_report_definitions_include_units_sources_and_raw_toliss_caveats(self):
+        definitions={d['signal']:d for d in signal_definitions([n for n,_,_ in SIGNALS]+list(DERIVED),SIGNALS)}
+        self.assertEqual(len(definitions),67)
+        self.assertEqual(definitions['wind_speed_mps']['unit'],'m/s')
+        self.assertEqual(definitions['distance_covered_nm']['protocol'],'derived')
+        self.assertEqual(definitions['toliss_ils1_localizer_raw']['unit'],'raw')
+        self.assertIn('do not score as dots',definitions['toliss_ils1_localizer_raw']['description'])
+        for d in definitions.values():
+            self.assertIn('https://',d['description'])
+            self.assertTrue(d['unit'])
 
 
 if __name__=='__main__': unittest.main()

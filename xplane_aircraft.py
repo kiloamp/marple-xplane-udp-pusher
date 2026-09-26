@@ -23,10 +23,11 @@ def packets(hz=1):
 
 
 def subscribe(sock,target,hz=1):
-    # Small bursts avoid overflowing the simulator's UDP receive buffer at startup.
-    for number,packet in enumerate(packets(hz)):
+    # Spread requests across simulator frames; burst loss can leave one missing
+    # character and prevent aircraft identification indefinitely on a busy sim.
+    for packet in packets(hz):
         sock.sendto(packet,target)
-        if number % 16 == 15:time.sleep(.003)
+        time.sleep(.003)
 
 
 def identity_key(identity):

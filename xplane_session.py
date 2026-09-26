@@ -14,6 +14,7 @@ from xplane_live import (Flight, Receiver, SIGNALS, FLIGHT_METADATA, CHALLENGE_P
                          LandingCut, AltitudeReset, next_remote_number, reserve_challenge_name,
                          LANDING_END_REASON, LANDING_TAIL_SECONDS, command_packet, pause_simulator)
 from xplane_aircraft import aircraft_mode, identity_key
+from xplane_sampling import LiveSampler, ReportTelemetry, SAMPLE_MODES
 
 ACROBATIC_PREFIX = "Marple_Acrobatic_"
 
@@ -68,9 +69,11 @@ class UploadWorker(threading.Thread):
 
 
 class SessionController:
-    def __init__(self,receiver,folder,stream=None,interval=1,duration=60,delay=5,auto_route=False):
+    def __init__(self,receiver,folder,stream=None,interval=1,duration=60,delay=5,auto_route=False,sample_mode='low'):
         self.receiver=receiver;self.folder=folder;self.stream=stream;self.interval=interval
         self.auto_route=auto_route;self.mode=None if auto_route else 'timed';self.aircraft=None
+        self.sample_mode=sample_mode;self.active_sample_mode=sample_mode
+        self.sampler=LiveSampler(sample_mode);self.report_telemetry=ReportTelemetry()
         self.requested_start=False;self.landing_cycle=False;self.reset_pending=False
         self.landing=LandingCut();self.reset_watch=AltitudeReset();self.minimum_numbers={}
         self.sequence_path=Path('outputs/xplane/challenge-sequence.json')
@@ -103,6 +106,7 @@ class SessionController:
         if self.mode=='landing' or self.requested_start:self.start(now)
 
     def begin_recording(self,now):
+        self.sampler=LiveSampler(self.active_sample_mode);self.report_telemetry=ReportTelemetry()
         self.timer.start(now);self.state='RECORDING'
         self.message='Recording landing; waiting for first gear compression.' if self.mode=='landing' else 'START — fly for 60 seconds.'
         self.record_path=self.folder/f'session-{self.number:03d}.jsonl'
@@ -110,6 +114,7 @@ class SessionController:
         self.session_manifest={'state':'CAPTURING','name':self.worker.name,
             'dataset_id':self.worker.flight.manifest.get('dataset_id'),
             'mode':self.mode,'aircraft':self.aircraft,
+            'live_sample_hz':self.sampler.hz,'local_capture_hz':10,
             'timer':LANDING_END_REASON if self.mode=='landing' else '60 wall-clock seconds',
             'start_monotonic':now}
         if self.mode!='landing':self.session_manifest['cutoff_monotonic']=now+self.duration
@@ -146,7 +151,9 @@ class SessionController:
         minimum=self.minimum_numbers.get(prefix,getattr(self,'minimum_number',1) if self.mode=='landing' else 1)
         if self.mode!='landing':namespace+=':acrobatic'
         name=reserve_challenge_name(self.sequence_path,namespace,minimum,prefix=prefix)
-        metadata={**FLIGHT_METADATA,'A/C Model':'Airbus A320' if self.mode=='landing' else 'Marple Acrobatic'}
+        self.active_sample_mode=self.sample_mode
+        metadata={**FLIGHT_METADATA,'A/C Model':'Airbus A320' if self.mode=='landing' else 'Marple Acrobatic',
+                  'Live Sample Rate Hz':SAMPLE_MODES[self.active_sample_mode], 'Local Capture Rate Hz':10}
         if self.aircraft:
             metadata.update({'X-Plane Aircraft':self.aircraft.get('description',''),
                              'X-Plane ICAO':self.aircraft.get('icao',''),'Session Mode':self.mode})
@@ -179,6 +186,7 @@ class SessionController:
             self.message='Start cancelled.'
     def feed(self,timestamp,mono,values):
         self.route(mono)
+        if self.state=='RECORDING':values=self.report_telemetry.add(mono,values)
         self.last_packet=mono;self.seen.update(values)
         self.latest.update({k:(v,mono) for k,v in values.items()})
         if self.mode=='landing' and self.aircraft is not None:
@@ -190,14 +198,21 @@ class SessionController:
                 if previous is None and self.landing.touchdown is not None:
                     self.reset_watch.landed=True
                     self.session_manifest.update(touchdown_time_ns=timestamp,cutoff_time_ns=timestamp+int(self.landing.tail*1e9))
+                    # Preserve a fresh touchdown snapshot even in 1 Hz live mode.
+                    fields=['latitude_deg','longitude_deg','airspeed_kias','groundspeed_kt',
+                            'vertical_speed_fpm','pitch_deg','roll_deg','normal_g','heading_magnetic_deg',
+                            'flap_deploy_ratio','throttle_lever_1_ratio','throttle_lever_2_ratio']
+                    self.session_manifest['touchdown_snapshot']={name:self.latest[name][0] for name in fields
+                        if name in self.latest and mono-self.latest[name][1]<.5}
                     self.save_session();self.log(f'First gear compression: recording {self.landing.tail:g} more seconds, then pausing.')
                 if self.landing.expired(mono):self.stop(mono,LANDING_END_REASON,pause=True)
         in_window=(self.mode=='landing' or (self.timer.started is not None and mono<self.timer.started+self.duration))
         if self.state=='RECORDING' and self.timer.started<=mono and in_window:
             # Separate journal remains authoritative even if the cloud worker fails.
             self.record_file.write(json.dumps({'time':timestamp,**values})+'\n')
-            if not self.worker.done.is_set():
-                try:self.worker.jobs.put_nowait((timestamp,values))
+            selected=self.sampler.select(mono,values)
+            if selected and not self.worker.done.is_set():
+                try:self.worker.jobs.put_nowait((timestamp,selected))
                 except queue.Full:
                     self.log('Upload queue full; ending session. Complete controller journal retained.')
                     self.stop(time.monotonic(),'upload queue full',pause=True)
@@ -212,6 +227,9 @@ class SessionController:
             if key=='start':self.start(now)
             elif key=='stop':self.stop(now)
             elif key=='quit':self.exit_requested=True;self.stop(now)
+            elif key=='rate':
+                self.sample_mode='high' if self.sample_mode=='low' else 'low'
+                self.log(f'Next flight live sampling: {self.sample_mode.upper()} ({SAMPLE_MODES[self.sample_mode]} Hz). Current dataset keeps its original rate.')
         if self.receiver.failure:
             self.log('UDP receiver failed: '+self.receiver.failure);self.stop(now,'UDP failure',pause=False)
             if self.state not in {'SAVING','RECORDING'}:self.state='ERROR';self.message='UDP receiver failed. Restart the service.'
@@ -246,6 +264,7 @@ class SessionController:
     def snapshot(self,now):
         flight=self.worker.flight if self.worker else None
         return {'state':self.state,'connected':self.connected(now),'signals':len(self.seen),
+                'sample_mode':self.sample_mode,'active_sample_mode':self.active_sample_mode,
                 'mode':self.mode or 'detecting','aircraft':(self.aircraft or {}).get('description','Waiting for UDP identity'),
                 'remaining':(max(0,self.landing.touchdown+self.landing.tail-now) if self.landing.touchdown is not None else self.landing.tail) if self.mode=='landing' else self.timer.remaining(now),'countdown':max(0,(self.countdown_until or now)-now),
                 'dataset':flight.manifest['name'] if flight else '—',
@@ -288,7 +307,7 @@ def draw_console(screen,controller):
         bar=(f' Waiting for touchdown; {LANDING_TAIL_SECONDS:g}-second tail, then pause.' if status['mode']=='landing' else ' ['+'#'*filled+'-'*(30-filled)+']')
         lines=['FLIGHT SESSION RECORDER','='*min(72,max(0,width-1)),
                f" {status['state']}    X-Plane: {'CONNECTED' if status['connected'] else 'WAITING'}",
-               f" Signals seen: {status['signals']}    Send pacing: >=1.05s after response",
+               f" Signals seen: {status['signals']} | Marple: {SAMPLE_MODES[status['active_sample_mode']]} Hz | Next: {status['sample_mode'].upper()} ({SAMPLE_MODES[status['sample_mode']]} Hz)",
                f" Mode: {status['mode']} | {status['aircraft']}",
                f" Session: {status['dataset']}",
                f" {'Starts in' if status['state']=='COUNTDOWN' else 'Time remaining'}: {status['countdown'] if status['state']=='COUNTDOWN' else status['remaining']:.1f}s    Pause: {status['pause']}",
@@ -296,7 +315,8 @@ def draw_console(screen,controller):
                f" Confirmed packets: {status['uploaded']}    Upload queue: {status['queue']}",'',
                ' '+status['message'],
                ' LOCAL CAPTURE ONLY — live upload failed; recovery runs at session end.' if status['cloud_failed'] else '',
-               '', ' [S] Start recording & pushing data   [X] Stop & save   [Q] Quit safely','',
+               '', ' [S] Start   [X] Stop & save   [R] Low/High (next flight)   [Q] Quit safely',
+               ' Local capture/detection: 10 Hz; HTTP batches paced >=1.05s after response.','',
                ' Recent activity:',*[' '+line for line in status['events']], '',
                (' Landing mode: pause at cutoff; reset to 3,000 ft and unpause for next flight.' if status['mode']=='landing' else ' Timer: 60 wall-clock seconds. Dismiss X-Plane alerts promptly.')]
         for row,line in enumerate(lines[:max(0,height-1)]):
@@ -309,7 +329,7 @@ def draw_console(screen,controller):
         screen.refresh()
         try:key=screen.getch()
         except KeyboardInterrupt:key=ord('q')
-        action={ord('s'):'start',ord('S'):'start',ord('x'):'stop',ord('X'):'stop',ord('q'):'quit',ord('Q'):'quit',3:'quit'}.get(key)
+        action={ord('s'):'start',ord('S'):'start',ord('x'):'stop',ord('X'):'stop',ord('r'):'rate',ord('R'):'rate',ord('q'):'quit',ord('Q'):'quit',3:'quit'}.get(key)
         if action:controller.commands.put(action)
         time.sleep(.1)
 
@@ -317,6 +337,8 @@ def draw_console(screen,controller):
 def main():
     ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('--host',default='127.0.0.1');ap.add_argument('--port',type=int,default=49000)
     ap.add_argument('--data-port',type=int,default=49005);ap.add_argument('--flush-seconds',type=float,default=1)
+    ap.add_argument('--sample-mode',choices=['low','high'],default='low')
+    ap.add_argument('--include-data',action='store_true',help='Opt in to legacy checkbox-selected DATA capture')
     ap.add_argument('--local-only',action='store_true');args=ap.parse_args()
     if args.flush_seconds<=0:ap.error('Upload interval must be positive')
     folder=Path('outputs/xplane')/datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S-%fZ');folder.mkdir(parents=True)
@@ -327,8 +349,8 @@ def main():
         stream=streams[0] if streams else db.create_stream('X-Plane Fair Live',type='realtime',description='Timed simulator sessions')
         datasets=list(stream.get_datasets())
         minimum_numbers={prefix:next_remote_number(datasets,prefix) for prefix in [CHALLENGE_PREFIX,ACROBATIC_PREFIX]}
-    receiver=Receiver(args.host,args.port,10,folder,args.data_port)
-    controller=SessionController(receiver,folder,stream,args.flush_seconds,auto_route=True);controller.minimum_numbers=minimum_numbers
+    receiver=Receiver(args.host,args.port,10,folder,args.data_port,include_data=args.include_data)
+    controller=SessionController(receiver,folder,stream,args.flush_seconds,auto_route=True,sample_mode=args.sample_mode);controller.minimum_numbers=minimum_numbers
     receiver.thread.start();thread=threading.Thread(target=controller_loop,args=(controller,),daemon=True);thread.start()
     try:curses.wrapper(draw_console,controller)
     except KeyboardInterrupt:pass

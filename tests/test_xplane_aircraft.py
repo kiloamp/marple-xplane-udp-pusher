@@ -125,6 +125,32 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(c.state,'SAVING')
         old.finish.assert_called_once_with('5 seconds after first gear compression')
         self.receiver.sock.sendto.assert_called_once_with(command_packet('sim/operation/pause_toggle'),self.receiver.target)
+
+    def test_rate_toggle_applies_to_next_flight_and_metadata(self):
+        c=self.start_landed_capture();old=c.worker
+        self.assertEqual(c.sampler.hz,1);self.assertEqual(old.metadata['Live Sample Rate Hz'],1)
+        c.commands.put('rate');c.tick(102.1)
+        self.assertEqual(c.sample_mode,'high');self.assertEqual(c.sampler.hz,1)
+        self.feed(106.9,ground=1,compression=.1,alt=3);c.tick(107)
+        self.feed(108);c.tick(108);c.tick(108.01)
+        self.assertEqual(c.state,'RECORDING')
+        self.assertEqual(c.sampler.hz,10)
+        self.assertEqual(c.worker.metadata['Live Sample Rate Hz'],10)
+        self.assertEqual(old.metadata['Live Sample Rate Hz'],1)
+
+    def test_low_rate_live_keeps_fast_local_touchdown_sample(self):
+        c=self.controller;self.receiver.identity.snapshot.return_value=TOLISS
+        self.feed(100);c.tick(100)
+        for i in range(1,31):
+            now=100+i/10
+            c.feed(int(now*1e9),now,{'paused':0,'replay':0,'on_ground':0 if i<25 else 1,
+                'gear_0_compression_m':.1 if i==25 else 0,'vertical_speed_mps':-2,
+                'airspeed_kias':135,'pitch_deg':3})
+        self.assertEqual(c.landing.touchdown,102.5)
+        self.assertAlmostEqual(c.session_manifest['touchdown_snapshot']['vertical_speed_fpm'],-2*60/.3048)
+        c.record_file.flush()
+        self.assertEqual(len(c.record_path.read_text().splitlines()),30)
+        self.assertEqual(c.worker.jobs.qsize(),3)
     def test_landing_is_not_cut_at_sixty_seconds(self):
         c=self.controller;self.receiver.identity.snapshot.return_value=TOLISS
         self.feed(100);c.tick(100);self.feed(161);c.tick(161)
