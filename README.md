@@ -13,7 +13,7 @@ live uploads, and finalizes and verifies each completed dataset.
 
 Both modes use `X-Plane Fair Live` for the preview and `X-Plane Flight Files` for
 analysis. Metadata `Capture Type` is `Live` or `SDK upload`; the original aircraft,
-airport and flight-type metadata is retained. **Landing mode pauses and resets after 10 seconds; timed mode does not pause.** The console shows the SDK file status and dataset ID. Open the
+airport and flight-type metadata is retained. **Landing mode pauses and resets after 10 seconds; timed mode does not pause.** The console shows the current challenge and analysis upload status; press D for diagnostics. Open the
 `SDK upload` dataset in Insight for analysis. FlyWithLua is not required.
 
 ## Quick start
@@ -48,7 +48,9 @@ to record without Marple writes.
 - **S:** start a timed session.
 - **X:** stop and save the current session.
 - **R:** toggle LOW (1 Hz) / HIGH (10 Hz) live sampling for the next flight.
-- **Q:** stop safely; wait for finalization before closing Terminal.
+- **N:** add/edit the last completed flight’s participant name, or retry a failed name update.
+- **D:** show/hide diagnostics (signal counts, queue, rate and recent activity).
+- **Q:** stop safely; wait for finalization and submitted names before closing Terminal.
 
 ## Programmatic signals and sample rate
 
@@ -103,10 +105,27 @@ of observed importer rounding, with exact per-signal sample counts.
 
 ## Dataset names and generated reviews
 
-The SDK analysis dataset is named `A320_Landing_Challenge_XXX.live` (or
-`Marple_Acrobatic_XXX.live`). It remains a **files** dataset tagged `SDK upload`;
-the local payload is still `.parquet`. The SDK's `file_name` override gives the
-uploaded dataset its `.live` name without changing the Parquet import configuration.
+Analysis datasets have a clean name: `A320_Landing_Challenge_XXX` or
+`Marple_Acrobatic_XXX`, with **no suffix** in Marple. Realtime previews use the
+same base name with **`.live`**, for example `A320_Landing_Challenge_001.live`.
+The local analysis payload retains its normal `.parquet` extension. These names
+apply to new flights; existing datasets are unchanged.
+
+When recording finishes, the console asks for the participant's name. **Enter**
+saves it as **Participant Name** metadata on that flight's SDK analysis dataset;
+**Esc** skips. Names can contain accents and spaces (up to 80 characters). While
+entering a name, shortcut letters are treated as text; **Ctrl+C** still quits safely.
+Press **N** afterward to edit the latest completed flight or retry a failed update.
+The prompt identifies its flight, even if the next recording starts meanwhile.
+
+The file upload still starts immediately at touchdown. Name entry and its metadata
+update run independently of recording/reset; if the file is still uploading, the
+name waits for it. The console says “saved to Marple” only after a read-back confirms
+it. Names are added to **dataset metadata**, without re-uploading or rewriting the
+original Parquet binary. They are also retained in the local analysis manifest and
+`raw-NNN.participant.json`; local-only mode saves them locally. A failed update
+shows a retry notice. Pending/failed names survive on disk but are not automatically
+resubmitted after restarting the service. Unanswered prompts do not block quitting.
 
 Each new SDK file receives a **Flight Review** metadata field. One of ten
 templates is selected from measured speed variation, bank, gear-handle timing,
@@ -129,7 +148,7 @@ Captures and manifests are stored under `outputs/xplane/`, excluded from Git.
 ## Code layout
 
 - `start_xplane_service.py`: launcher and single-instance lock.
-- `xplane_session.py`: terminal console, aircraft routing and session controller.
+- `xplane_session.py`, `xplane_tui.py`: terminal console, aircraft routing and session controller.
 - `xplane_live.py`, `xplane_aircraft.py`, `xplane_signals.py`: UDP capture,
   aircraft identification, landing/reset detection and signal descriptions.
 - `xplane_marple.py`, `env_loader.py`: SDK and Trino connections, local credentials.

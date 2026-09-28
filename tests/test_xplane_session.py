@@ -58,6 +58,7 @@ class TimedSessionTests(unittest.TestCase):
             worker.jobs.put((1,{'pitch_deg':1}));worker.jobs.put((2,{'pitch_deg':2}))
             worker.finish('complete');worker.start();worker.join(2)
             self.assertTrue(worker.done.is_set());self.assertIsNone(worker.error)
+            self.assertEqual(flight.call_args.args[3],'test.live')
             self.assertEqual(flight.return_value.add.call_count,2)
             flight.return_value.finish.assert_called_once_with('complete')
 

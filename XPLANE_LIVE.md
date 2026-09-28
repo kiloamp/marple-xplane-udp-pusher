@@ -203,10 +203,22 @@ The format and file-stream configuration follow the
 
 ## Analysis names and review criteria
 
-Local files remain `<session-name>.parquet`; SDK `push_file(file_name=...)` names
-the uploaded file dataset `<session-name>.live`. The stream remains type `files`,
-and metadata remains `Capture Type: SDK upload`. Realtime preview names are
-unchanged. Sequence numbering recognises both historic `.parquet` and new `.live` names.
+Local files remain `<session-name>.parquet`; SDK `push_file(file_name=...)` gives
+the uploaded analysis dataset the clean `<session-name>` name, without a suffix.
+It remains type `files`, with `Capture Type: SDK upload`. Realtime preview names
+are `<session-name>.live`. Sequence numbering recognises clean names and historic
+`.parquet`/`.live` names. Existing datasets are not renamed.
+
+After recording ends, the compact console asks for a participant name (Enter saves,
+Esc skips). It updates **Participant Name** on the SDK file dataset via
+`Dataset.update_metadata`, preserving existing metadata, then reads it back to
+confirm. The worker waits for file upload completion and retains that flight's
+identity even during the next recording. The original Parquet binary is not
+rewritten; local manifests and `raw-NNN.participant.json` retain the name/status.
+N edits the last completed flight or retries a failed update; D toggles diagnostic
+information. Submitted updates finish before Q exits; unanswered prompts do not
+block exit. Failed/pending updates are retained locally, but not automatically
+replayed after a service restart.
 
 Each SDK upload contains one `Flight Review` metadata string, selected from ten
 templates. The review is computed from the immutable raw snapshot before upload,

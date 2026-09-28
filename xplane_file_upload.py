@@ -93,7 +93,7 @@ class FileUploadWorker(threading.Thread):
         self.path = self.source.parent / f'{name}.parquet'
         self.manifest_path = self.source.parent / f'raw-{number:03d}.json'
         self.metadata = {**metadata, 'Capture Type': 'SDK upload'}
-        self.manifest = {'name': f'{name}.live', 'state': 'PREPARING', 'metadata': self.metadata,
+        self.manifest = {'name': name, 'state': 'PREPARING', 'metadata': self.metadata,
                          'source': str(self.source), 'source_bytes': byte_limit,
                          'file': str(self.path), 'stream': FILE_STREAM_NAME}
 
@@ -139,3 +139,51 @@ class FileUploadWorker(threading.Thread):
             self.log('SDK file upload not confirmed; local file retained. See ' + str(self.manifest_path))
         finally:
             self.done.set()
+
+
+class ParticipantUploadWorker(threading.Thread):
+    """Attach a name to one immutable flight target, after its file worker exits."""
+    def __init__(self, file_worker, name):
+        super().__init__(daemon=True)
+        name = name.strip()
+        if not name or len(name) > 80 or not all(c.isprintable() for c in name):
+            raise ValueError('Enter a name of 1–80 printable characters')
+        self.file_worker = file_worker
+        self.name = name
+        self.done = threading.Event()
+        self.state = 'WAITING'
+        self.path = file_worker.manifest_path.with_suffix('.participant.json')
+
+    def save(self):
+        self.path.write_text(json.dumps({'name': self.name, 'state': self.state,
+            'analysis_manifest': str(self.file_worker.manifest_path),
+            'dataset_id': self.file_worker.manifest.get('dataset_id')}, indent=2) + '\n')
+
+    def run(self):
+        try:
+            self.save()  # Retain the entered name even if upload or connectivity fails.
+            self.file_worker.done.wait()
+            worker = self.file_worker
+            worker.metadata['Participant Name'] = self.name
+            worker.save()
+            if worker.stream is None:
+                self.state = 'LOCAL'
+            else:
+                dataset_id = worker.manifest.get('dataset_id')
+                if dataset_id is None:
+                    raise RuntimeError('File upload has no confirmed dataset ID')
+                self.state = 'SAVING'; self.save()
+                # Fetch fresh metadata so the SDK merge preserves the review and
+                # metadata edited outside this recorder.
+                dataset = worker.stream.get_dataset(dataset_id)
+                dataset.update_metadata({'Participant Name': self.name})
+                confirmed = worker.stream.get_dataset(dataset_id)
+                if confirmed.metadata.get('Participant Name') != self.name:
+                    raise RuntimeError('Participant metadata was not confirmed')
+                self.state = 'SAVED'
+        except Exception:
+            self.state = 'ERROR'
+            self.file_worker.log('Participant name not confirmed; retained locally. Press N to retry.')
+        finally:
+            try:self.save()
+            finally:self.done.set()

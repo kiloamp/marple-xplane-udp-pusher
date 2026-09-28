@@ -15,7 +15,8 @@ from xplane_live import (Flight, Receiver, SIGNALS, FLIGHT_METADATA, CHALLENGE_P
                          command_packet)
 from xplane_aircraft import aircraft_mode, identity_key
 from xplane_sampling import LiveSampler, ReportTelemetry, SAMPLE_MODES, LIVE_SIGNALS
-from xplane_file_upload import FileUploadWorker, file_stream
+from xplane_file_upload import FileUploadWorker, ParticipantUploadWorker, file_stream
+from xplane_tui import ConsoleInput, console_lines
 from xplane_reset import LandingReset, POSITION_FIELDS, fresh_values, reset_packet
 
 ACROBATIC_PREFIX = "Marple_Acrobatic_"
@@ -54,7 +55,7 @@ class UploadWorker(threading.Thread):
         self.finish_reason=None
     def run(self):
         try:
-            self.flight=Flight(self.folder,self.number,self.stream,self.name,log=self.log,metadata=self.metadata)
+            self.flight=Flight(self.folder,self.number,self.stream,f'{self.name}.live',log=self.log,metadata=self.metadata)
             self.ready.set();last=time.monotonic()
             while True:
                 try:job=self.jobs.get(timeout=.05)
@@ -76,6 +77,7 @@ class SessionController:
     def __init__(self,receiver,folder,stream=None,interval=1,duration=60,delay=5,auto_route=False,sample_mode='low',analysis_stream=None):
         self.receiver=receiver;self.folder=folder;self.stream=stream;self.interval=interval
         self.analysis_stream=analysis_stream;self.file_worker=None;self.file_workers=[]
+        self.completed_files=[];self.participant_jobs=[]
         self.auto_route=auto_route;self.mode=None if auto_route else 'timed';self.aircraft=None
         self.sample_mode=sample_mode;self.active_sample_mode=sample_mode
         self.sampler=LiveSampler(sample_mode);self.report_telemetry=ReportTelemetry()
@@ -195,6 +197,9 @@ class SessionController:
             self.state='READY';self.message='Stopped. Press S to start again.'
         if self.state=='RECORDING':
             self.start_file_upload(reason)
+            if self.file_worker is not None:
+                self.completed_files.append({'id':str(self.file_worker.manifest_path),
+                    'worker':self.file_worker,'job':None})
             self.state='SAVING';self.message='Recording stopped. Uploading remaining data and finalizing Marple…'
             if self.record_file:self.record_file.close();self.record_file=None
             self.session_manifest.update(state='LOCAL_CAPTURE_COMPLETE',end_reason=reason,capture_complete=True)
@@ -257,11 +262,19 @@ class SessionController:
     def save_reset_status(self):
         self.session_manifest['automatic_reset']={'state':self.resetter.state,'message':self.resetter.message}
         self.save_session()
+    def set_participant(self, target, name):
+        entry=next((e for e in self.completed_files if e['id']==target),None)
+        if entry is None or (entry['job'] and not entry['job'].done.is_set()):return
+        try:job=ParticipantUploadWorker(entry['worker'],name)
+        except ValueError:return
+        entry['job']=job;self.participant_jobs.append(job);job.start()
     def tick(self,now):
         self.route(now)
         while not self.commands.empty():
             key=self.commands.get_nowait()
-            if key=='start':self.start(now)
+            if isinstance(key,tuple) and len(key)==3 and key[0]=='participant':
+                self.set_participant(key[1],key[2])
+            elif key=='start':self.start(now)
             elif key=='stop':self.stop(now)
             elif key=='quit':self.exit_requested=True;self.stop(now)
             elif key=='rate':
@@ -304,24 +317,31 @@ class SessionController:
             self.start(now)
             self.message='3,000 ft reset detected. Finish ISCS setup, then unpause to start the next recording.'
         if self.exit_requested and self.state not in {'SAVING','RECORDING','COUNTDOWN'}:
-            if all(w.done.is_set() for w in self.file_workers):self.closed=True
+            if all(w.done.is_set() for w in self.file_workers+self.participant_jobs):self.closed=True
             else:self.message='Waiting for SDK file uploads before exiting…'
     def snapshot(self,now):
         flight=self.worker.flight if self.worker else None
+        analysis=self.file_worker or (self.file_workers[-1] if self.file_workers else None)
         return {'state':self.state,'connected':self.connected(now),'signals':len(self.seen),
+                'exiting':self.exit_requested,'reset_state':self.resetter.state,
+                'completed':[{'id':e['id'],'name':e['worker'].manifest['name'],
+                    'participant':e['job'].name if e['job'] else '',
+                    'name_status':e['job'].state if e['job'] else 'UNNAMED'} for e in self.completed_files],
+                'analysis_name':analysis.manifest['name'] if analysis else '',
+                'analysis_state':analysis.manifest['state'] if analysis else '',
                 'live_signals':len(self.sampler.last_bucket),'touchdown':self.landing.touchdown is not None,
                 'sample_mode':self.sample_mode,'active_sample_mode':self.active_sample_mode,
                 'mode':self.mode or 'detecting','aircraft':(self.aircraft or {}).get('description','Waiting for UDP identity'),
                 'remaining':(max(0,self.landing.touchdown+self.landing.tail-now) if self.landing.touchdown is not None else self.landing.tail) if self.mode=='landing' else self.timer.remaining(now),'countdown':max(0,(self.countdown_until or now)-now),
                 'dataset':flight.manifest['name'] if flight else '—',
-                'analysis':(f"{self.file_worker.manifest['state']} | dataset={self.file_worker.manifest.get('dataset_id','—')} | {self.file_worker.manifest['name']}" if self.file_worker else 'Waiting for touchdown' if self.mode=='landing' else 'Waiting for session end'),
+                'analysis':(f"{analysis.manifest['state']} | dataset={analysis.manifest.get('dataset_id','—')} | {analysis.manifest['name']}" if analysis else 'Waiting for touchdown' if self.mode=='landing' else 'Waiting for session end'),
                 'uploaded':flight.manifest.get('confirmed_uploaded_packets',0) if flight else 0,
                 'queue':self.worker.jobs.qsize() if self.worker else 0,
                 'cloud_failed':bool(self.worker and (self.worker.error or (flight and flight.failed))),'message':self.message,'events':list(self.events),
                 'pause': self.resetter.message if self.mode=='landing' else 'automatic pause disabled'}
     def close(self):
         if self.record_file:self.record_file.close()
-        for worker in self.file_workers:
+        for worker in self.file_workers+self.participant_jobs:
             while worker.is_alive():worker.join(timeout=.5)
         self.log_file.close()
 
@@ -350,36 +370,22 @@ def draw_console(screen,controller):
         curses.start_color();curses.use_default_colors()
         curses.init_pair(1,curses.COLOR_CYAN,-1);curses.init_pair(2,curses.COLOR_GREEN,-1)
         curses.init_pair(3,curses.COLOR_YELLOW,-1);curses.init_pair(4,curses.COLOR_RED,-1)
+    editor=ConsoleInput()
     while not controller.closed:
-        status=controller.snapshot(time.monotonic());screen.erase();height,width=screen.getmaxyx()
-        filled=int(30*(1-status['remaining']/controller.duration))
-        bar=((' Touchdown detected; SDK file uploading separately.' if status['touchdown'] else f' Waiting for touchdown; SDK file then, realtime +{LANDING_TAIL_SECONDS:g}s.') if status['mode']=='landing' else ' ['+'#'*filled+'-'*(30-filled)+']')
-        lines=['FLIGHT SESSION RECORDER','='*min(72,max(0,width-1)),
-               f" {status['state']}    X-Plane: {'CONNECTED' if status['connected'] else 'WAITING'}",
-               f" Local signals: {status['signals']} | Live: {status['live_signals']}/8 at {SAMPLE_MODES[status['active_sample_mode']]} Hz | Next: {status['sample_mode'].upper()}",
-               f" Mode: {status['mode']} | {status['aircraft']}",
-               f" Session: {status['dataset']}",
-               f" SDK analysis file: {status['analysis']}",
-               f" {'Starts in' if status['state']=='COUNTDOWN' else 'Time remaining'}: {status['countdown'] if status['state']=='COUNTDOWN' else status['remaining']:.1f}s    Pause: {status['pause']}",
-               bar,
-               f" Confirmed packets: {status['uploaded']}    Upload queue: {status['queue']}",'',
-               ' '+status['message'],
-               ' LIVE PREVIEW FAILED — SDK file upload is independent; check its status above.' if status['cloud_failed'] else '',
-               '', ' [S] Start   [X] Stop & save   [R] Low/High (next flight)   [Q] Quit safely',
-               ' Local capture/detection: 10 Hz; HTTP batches paced >=1.05s after response.','',
-               ' Recent activity:',*[' '+line for line in status['events']], '',
-               (' Landing: SDK file at touchdown; pause/reset +10s; ISCS and unpause are manual.' if status['mode']=='landing' else ' Timer: 60 wall-clock seconds. No auto-pause. Dismiss alerts promptly.')]
+        status=controller.snapshot(time.monotonic())
+        editor.observe(status)
+        screen.erase();height,width=screen.getmaxyx()
+        lines=console_lines(status,editor)
         for row,line in enumerate(lines[:max(0,height-1)]):
-            style=curses.A_BOLD if row in [0,2] else 0
-            if curses.has_colors():
-                if row==0:style|=curses.color_pair(1)
-                elif row==2:style|=curses.color_pair(4 if status['state']=='ERROR' else 2 if status['state'] in {'RECORDING','COMPLETE'} else 3)
+            style=curses.A_BOLD if row in (0,2) else 0
+            if curses.has_colors() and row==0:style|=curses.color_pair(1)
             try:screen.addnstr(row,0,line,max(0,width-1),style)
             except curses.error:pass
         screen.refresh()
-        try:key=screen.getch()
-        except KeyboardInterrupt:key=ord('q')
-        action={ord('s'):'start',ord('S'):'start',ord('x'):'stop',ord('X'):'stop',ord('r'):'rate',ord('R'):'rate',ord('q'):'quit',ord('Q'):'quit',3:'quit'}.get(key)
+        try:key=screen.get_wch()
+        except curses.error:key=None
+        except KeyboardInterrupt:key='\x03'
+        action=editor.handle(key,status)
         if action:controller.commands.put(action)
         time.sleep(.1)
 

@@ -73,6 +73,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(c.worker.metadata['Capture Type'],'Live')
         self.assertEqual(c.worker.metadata['A/C Model'],'Airbus A320')
         upload=c.file_worker
+        self.assertEqual(c.completed_files,[])
         self.assertIsNotNone(upload)
         upload.join(5)
         self.assertEqual(upload.manifest['state'],'LOCAL_FILE_READY')
@@ -87,6 +88,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(c.state,'RECORDING')
         self.assertAlmostEqual(c.snapshot(111.99)['remaining'],.01)
         old=c.worker;c.tick(112)
+        self.assertIs(c.completed_files[0]['worker'],upload)
         self.assertEqual(c.state,'WAIT_RESET')
         self.assertEqual(old.reason,'10 seconds after first gear compression')
         self.assertIs(c.file_worker,upload)
