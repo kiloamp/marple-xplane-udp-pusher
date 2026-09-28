@@ -366,6 +366,7 @@ class Flight:
         self.manifest["last_time_ns"] = timestamp
 
     def flush(self):
+        from xplane_values import signal_row
         if self.failed:
             self.pending.clear()
             self.last_flush = time.monotonic()
@@ -376,7 +377,7 @@ class Flight:
         if self.dataset is not None:
             import pandas as pd
             # Long format preserves each signal's own arrival time; no fill-forward.
-            rows = [{"time": sample["time"], "signal": name, "value": value}
+            rows = [signal_row(sample['time'], name, value)
                     for sample in self.pending for name, value in sample.items() if name != "time"]
             self.manifest["state"] = "APPENDING"
             self.save()

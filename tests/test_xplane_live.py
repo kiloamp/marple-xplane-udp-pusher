@@ -229,7 +229,7 @@ class LifecycleTests(unittest.TestCase):
         flight.finish("operator stop")
         self.assertEqual(calls, ["append", "cool"])
         rows = self.dataset.append.call_args.args[0].to_dict("records")
-        self.assertEqual(rows, [{"time": 100, "signal": "airspeed_kias", "value": 60}, {"time": 200, "signal": "pitch_deg", "value": 5}])
+        self.assertEqual(rows, [{"time": 100, "signal": "airspeed_kias", "value": 60, "value_text": None}, {"time": 200, "signal": "pitch_deg", "value": 5, "value_text": None}])
         self.assertEqual(json.loads(flight.manifest_path.read_text())["state"], "FINISHED")
 
     def test_uncertain_append_is_not_retried_and_local_capture_continues(self):

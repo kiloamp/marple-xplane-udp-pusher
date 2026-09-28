@@ -4,12 +4,14 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from collections import Counter
 from pathlib import Path
 
 import pandas as pd
 
 from env_loader import load_local_env
 from xplane_marple import MarpleTrinoClient
+from xplane_values import value_columns
 
 
 def verify_capture(dataset, capture: Path, *, repair=False, log=print, timestamp_tolerance_ns=0):
@@ -19,7 +21,8 @@ def verify_capture(dataset, capture: Path, *, repair=False, log=print, timestamp
         sample = json.loads(line)
         for name, value in sample.items():
             if name != "time":
-                expected.setdefault(name, []).append({"time": sample["time"], "value": value})
+                columns = value_columns(value) if isinstance(value,str) else {'value':value}
+                expected.setdefault(name, []).append({'time': sample['time'], **columns})
     client = MarpleTrinoClient()
     catalog = client.config.cold_catalog
     pool = client.config.datapool
@@ -37,6 +40,17 @@ def verify_capture(dataset, capture: Path, *, repair=False, log=print, timestamp
                     or abs(found.first_time - rows[0]["time"]) > timestamp_tolerance_ns
                     or abs(found.last_time - rows[-1]["time"]) > timestamp_tolerance_ns):
                 bad.append(name)
+        text_names = [name for name, rows in expected.items() if any('value_text' in row for row in rows)]
+        if text_names:
+            ids = [signals[name].id for name in text_names if name in signals]
+            if ids:
+                text_sql = f"SELECT signal,value_text,count(*) AS n FROM {catalog}.{pool}.data WHERE dataset={int(dataset.id)} AND signal IN ({','.join(str(int(i)) for i in ids)}) GROUP BY signal,value_text"
+                actual_text = client.execute(text_sql).dataframe
+                for name in text_names:
+                    signal = signals.get(name)
+                    counts = {row.value_text:int(row.n) for row in actual_text.itertuples() if signal and row.signal == signal.id}
+                    if counts != Counter(row.get('value_text') for row in expected[name]) and name not in bad:
+                        bad.append(name)
         return bad, actual
 
     bad, actual = mismatches()
@@ -70,7 +84,7 @@ def verify_capture(dataset, capture: Path, *, repair=False, log=print, timestamp
                 break
             time.sleep(1)
     result = {"dataset_id": dataset.id, "verified": not bad,
-              "verification": "per-signal count and first/last timestamp in cold storage",
+              "verification": "per-signal count and first/last timestamp in cold storage; text value counts when present",
               "timestamp_tolerance_ns": timestamp_tolerance_ns,
               "expected_datapoints": sum(map(len, expected.values())),
               "actual_datapoints": int(actual.n.sum()), "signals": len(expected),

@@ -59,11 +59,14 @@ landing-report set directly: GPS position, speed, altitude, heading, attitude,
 vertical speed, throttle requests, N1, flaps, speedbrakes, guidance and landing gear.
 It derives distance covered and report-friendly units. Confirmed ToLiss aircraft
 also supply ten custom flight-director, autopilot, autothrust and ILS indications.
-Up to 57 signals are recorded for other aircraft, or 67 for ToLiss.
+Up to 57 signals are recorded for other aircraft, or 80 for ToLiss, including
+the text flap label and 12 approach geometry signals when their inputs are valid.
 
-Realtime sends only eight signals: airspeed KIAS, altitude MSL ft, roll, pitch,
-magnetic heading, latitude, longitude and vertical speed FPM. All other received
-channels stay in the full-rate file.
+Realtime sends the original eight flight-display signals (airspeed, altitude, roll,
+pitch, heading, GPS and vertical speed). ToLiss landing sessions also send the flap
+text and ten synchronized scatter signals: **up to 19 live signals**. Other received
+channels and two signed approach-error signals stay in the full-rate file. This
+uses existing UDP inputs; no extra simulator subscriptions are required.
 
 The default **LOW** mode sends at most one sample per preview signal per second;
 **HIGH** sends up to ten. Select `--sample-mode low|high` or press **R** in the console
@@ -77,11 +80,44 @@ unverified scales remain explicitly raw, with separate display flags.
 See [operating details](XPLANE_LIVE.md) for the signal groups and interpretation.
 Legacy checkbox capture requires explicit `--include-data` and is normally disabled.
 
+## Flap text and ILS scatter plots
+
+`flap_configuration` is a **text signal** in live and Parquet data: `Flap 0`,
+`Flap 1`, `Flap 2`, `Flap 3`, `Flap Full`. It labels the selected ToLiss lever
+position, not the moving flap surfaces or the automatic CONF 1/1+F distinction.
+Numeric `flap_deploy_ratio` remains available for actual deployment. The label is
+omitted between recognized detents and on other aircraft. Text uses Marple's
+`value_text` column; verification checks the stored text as well as sample counts.
+
+The reference is fixed to **LEPA runway 06L**, identified from Challenge 18 and
+checked against this simulator's runway/localizer/glideslope data. These are two
+separate scatter plots, each with one shared Y and multiple X signals:
+
+| Plot | Shared Y | X signals (add all four) | Units |
+| --- | --- | --- | --- |
+| Lateral / top view | `ils_plot_latitude_deg` | `ils_plot_longitude_deg`, `ils_center_longitude_deg`, `ils_left_longitude_deg`, `ils_right_longitude_deg` | degrees on both axes |
+| Vertical / approach profile | `ils_distance_to_threshold_m` | `ils_aircraft_altitude_msl_m`, `ils_glidepath_altitude_msl_m`, `ils_lower_altitude_msl_m`, `ils_upper_altitude_msl_m` | metres on both axes |
+
+Show the aircraft as points and the three references as lines. With Marple's one-Y
+layout, the vertical plot has **altitude horizontally and remaining distance
+vertically**; reversing the distance axis puts the runway at the top. All X signals
+in a plot share units, timestamps and the same Y. The reference longitudes are
+computed at the aircraft's latitude, so the plotted corridor stays fixed on the map.
+Use the paired `ils_plot_*` GPS signals for this overlay; raw GPS remains available.
+Latitude/longitude share angular units but have different metres per degree.
+
+The corridor narrows toward the transmitters: default lateral half-width is 105 m
+at the threshold; vertical limits are 2.65° and 3.35° around a 3° glidepath.
+These are **illustrative training bounds**, not measured ILS dots or an automatic
+pass/fail test. The aircraft's path never defines the ideal centreline. See
+[geometry, sources and limits](XPLANE_LIVE.md#ils-scatter-geometry) for configuration.
+New recordings include these channels; historical datasets are not rewritten.
+
 ## Completion and recovery
 
 At first landing-gear compression, the service freezes a full-rate snapshot,
 including the touchdown packet, and uploads it through SDK `push_file()` as a
-Parquet file. It preserves every received numeric signal and original nanosecond
+Parquet file. It preserves numeric and generated text signals and original nanosecond
 timestamp. The analysis file ends at first touchdown; the 10-second taxi tail
 continues in realtime and the local session journal. Upload duration depends on
 network/import time and does not change the realtime deadline.

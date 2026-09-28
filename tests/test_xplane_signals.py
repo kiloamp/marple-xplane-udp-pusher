@@ -129,7 +129,7 @@ class DataTests(unittest.TestCase):
 
     def test_report_definitions_include_units_sources_and_raw_toliss_caveats(self):
         definitions={d['signal']:d for d in signal_definitions([n for n,_,_ in SIGNALS]+list(DERIVED),SIGNALS)}
-        self.assertEqual(len(definitions),67)
+        self.assertEqual(len(definitions),68)
         self.assertEqual(definitions['wind_speed_mps']['unit'],'m/s')
         self.assertEqual(definitions['distance_covered_nm']['protocol'],'derived')
         self.assertEqual(definitions['toliss_ils1_localizer_raw']['unit'],'raw')

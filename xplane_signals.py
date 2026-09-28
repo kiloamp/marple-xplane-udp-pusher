@@ -97,6 +97,7 @@ def decode_data(packet):
 
 def signal_definitions(names, rrefs):
     from xplane_report_signals import EXTRA_DESCRIPTIONS, report_definition
+    from xplane_approach import definition as approach_definition
     refs = {name:(ref,unit) for name,ref,unit in rrefs}
     descriptions = {
         'flight_time_s':'Elapsed simulator flight time.', 'paused':'Simulator pause flag: 1 paused, 0 running.',
@@ -110,7 +111,7 @@ def signal_definitions(names, rrefs):
     descriptions.update(EXTRA_DESCRIPTIONS)
     result=[]
     for name in sorted(names):
-        special = report_definition(name)
+        special = report_definition(name) or approach_definition(name)
         if special is not None:
             result.append(special)
         elif name in BY_NAME:

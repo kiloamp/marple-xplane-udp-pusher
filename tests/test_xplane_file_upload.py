@@ -39,7 +39,7 @@ class FileUploadTests(unittest.TestCase):
         self.assertEqual(worker.manifest['state'], 'LOCAL_FILE_READY')
         table = pq.read_table(worker.path)
         self.assertEqual(table.schema.field('time').type, pa.int64())
-        expected = [{'time': s['time'], 'signal': k, 'value': v}
+        expected = [{'time': s['time'], 'signal': k, 'value': v, 'value_text': None}
                     for s in self.samples for k, v in s.items() if k != 'time']
         self.assertEqual(table.to_pylist(), expected)
         self.assertEqual(table.schema.metadata[b'Capture Type'], b'SDK upload')
@@ -110,7 +110,7 @@ class FileUploadTests(unittest.TestCase):
             c.record_file.flush()
             sent = c.worker.jobs.put_nowait.call_args.args[0][1]
             self.assertEqual(set(sent), LIVE_SIGNALS)
-            self.assertEqual(len(sent), 8)
+            self.assertEqual(len(sent), len(LIVE_SIGNALS))
             saved = json.loads((self.folder / 'test.jsonl').read_text())
             self.assertEqual(saved['toliss_fd1_engaged'], 1)
             self.assertEqual(saved['gear_0_compression_m'], .1)

@@ -17,6 +17,7 @@ from xplane_aircraft import aircraft_mode, identity_key
 from xplane_sampling import LiveSampler, ReportTelemetry, SAMPLE_MODES, LIVE_SIGNALS
 from xplane_file_upload import FileUploadWorker, ParticipantUploadWorker, file_stream
 from xplane_tui import ConsoleInput, console_lines
+from xplane_approach import APPROACH_METADATA
 from xplane_reset import LandingReset, POSITION_FIELDS, fresh_values, reset_packet
 
 ACROBATIC_PREFIX = "Marple_Acrobatic_"
@@ -116,7 +117,7 @@ class SessionController:
         if self.mode=='landing' or self.requested_start:self.start(now)
 
     def begin_recording(self,now):
-        self.sampler=LiveSampler(self.active_sample_mode);self.report_telemetry=ReportTelemetry()
+        self.sampler=LiveSampler(self.active_sample_mode);self.report_telemetry=ReportTelemetry(landing=self.mode=='landing')
         self.timer.start(now);self.state='RECORDING'
         self.message='Recording landing; waiting for first gear compression.' if self.mode=='landing' else 'START — fly for 60 seconds.'
         self.record_path=self.folder/f'session-{self.number:03d}.jsonl'
@@ -171,6 +172,7 @@ class SessionController:
         if self.aircraft:
             metadata.update({'X-Plane Aircraft':self.aircraft.get('description',''),
                              'X-Plane ICAO':self.aircraft.get('icao',''),'Session Mode':self.mode})
+        if self.mode=='landing':metadata.update(APPROACH_METADATA)
         self.worker=UploadWorker(self.folder,self.number,name,self.stream,self.interval,self.log,metadata=metadata)
         self.worker.start();self.countdown_until=now+(0 if self.mode=='landing' else self.delay);self.state='COUNTDOWN'
         self.message='Get ready — recording starts after the countdown.'

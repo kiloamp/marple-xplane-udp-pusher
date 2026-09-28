@@ -8,6 +8,7 @@ from pathlib import Path
 
 from xplane_signals import signal_definitions
 from xplane_review import review_capture
+from xplane_values import signal_row
 
 FILE_STREAM_NAME = 'X-Plane Flight Files'
 FILE_PLUGIN_ARGS = '--shape long --time-factor 1'
@@ -55,7 +56,7 @@ def export_snapshot(source, byte_limit, journal, parquet, metadata):
     review = review_capture(journal, metadata)
     metadata['Flight Review'] = review['text']
     journal.with_suffix('.review.json').write_text(json.dumps(review, indent=2) + '\n')
-    schema = pa.schema([('time', pa.int64()), ('signal', pa.string()), ('value', pa.float64())],
+    schema = pa.schema([('time', pa.int64()), ('signal', pa.string()), ('value', pa.float64()), ('value_text', pa.string())],
                        metadata={k: str(v) for k, v in metadata.items()})
     names = set()
     count = 0
@@ -67,7 +68,7 @@ def export_snapshot(source, byte_limit, journal, parquet, metadata):
                 for name, value in sample.items():
                     if name == 'time':
                         continue
-                    rows.append({'time': sample['time'], 'signal': name, 'value': value})
+                    rows.append(signal_row(sample['time'], name, value))
                     names.add(name)
                     count += 1
                 if len(rows) >= 50000:

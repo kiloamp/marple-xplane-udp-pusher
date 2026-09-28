@@ -52,6 +52,7 @@ TOLISS_RREFS = [
 ]
 
 DERIVED = {
+    'flap_configuration': ('text', 'Selected ToLiss flap lever detent: Flap 0, Flap 1, Flap 2, Flap 3, Flap Full for ratios 0, 0.25, 0.5, 0.75, 1. Only values within 0.025 of a detent are labeled. Commanded handle position, not actual flap angle or CONF 1+F; omitted on other aircraft.'),
     'altitude_msl_ft': ('ft', 'Geometric MSL altitude converted from altitude_msl_m; not barometric indicated altitude.'),
     'altitude_agl_ft': ('ft', 'Height above local terrain converted from altitude_agl_m.'),
     'groundspeed_kt': ('kt', 'Ground speed converted from groundspeed_mps.'),
@@ -63,6 +64,12 @@ EXTRA_DESCRIPTIONS = {name: desc for name, _, _, desc in REPORT_RREFS + TOLISS_R
 
 
 def report_definition(name):
+    if name == 'flap_configuration':
+        unit, desc = DERIVED[name]
+        return {'signal': name, 'unit': unit, 'description': f'{desc} Source: installed ToLiss A319 XP11; {TOLISS_SOURCE}',
+                'protocol': 'derived', 'dataref': 'AirbusFBW/FlapLeverRatio',
+                'source_url': TOLISS_SOURCE,
+                'mapping_basis': 'Installed ToLiss A319 XP11: four equally spaced lever steps; validate if using a different aircraft version.'}
     if name in DERIVED:
         unit, desc = DERIVED[name]
         return {'signal': name, 'unit': unit, 'description': f'{desc} Sources: {STANDARD_SOURCE}',

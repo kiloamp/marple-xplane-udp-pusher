@@ -29,7 +29,7 @@ sample rate and the requested local capture rate.
 
 ## Rates and data paths
 
-| Mode | Local RREF capture / detection | Samples sent to the eight-signal live preview |
+| Mode | Local RREF capture / detection | Samples sent per live signal |
 | --- | --- | --- |
 | LOW (default) | Requested 10 Hz | At most one sample per signal per 1-second bucket |
 | HIGH | Requested 10 Hz | At most one sample per signal per 0.1-second bucket |
@@ -41,10 +41,11 @@ are sampled independently. HTTP uploads batch those selected samples; they are
 paced at least 1.05 seconds **after the previous response**, so 1 Hz signal sampling
 does not promise one HTTP call or screen update per second.
 
-The live preview contains only `airspeed_kias`, `altitude_msl_ft`, `roll_deg`,
+The base live preview contains `airspeed_kias`, `altitude_msl_ft`, `roll_deg`,
 `pitch_deg`, `heading_magnetic_deg`, `latitude_deg`, `longitude_deg` and
-`vertical_speed_fpm`. Heading is magnetic; no extra control/status signals are
-sent live. Full-rate file capture still includes all returned/derived channels.
+`vertical_speed_fpm`. ToLiss landing sessions add `flap_configuration` text and
+ten synchronized ILS scatter channels (up to 19 signals). Heading is magnetic.
+Full-rate file capture still includes all returned/derived channels.
 
 The main console writes the full received, enriched telemetry to `session-NNN.jsonl`
 and the selected upload data to `flight-NNN.jsonl`. Thus LOW preserves fine local
@@ -59,8 +60,9 @@ receiver's timestamps or touchdown processing. Aircraft identity uses separate
 ## Curated landing-report signals
 
 The set contains **52 standard RREF channels**, **10 additional ToLiss channels**
-when that aircraft is confirmed, and up to **5 derived channels**: normally up to
-57 signals for another aircraft or 67 for ToLiss. Only returned/derived values are
+when that aircraft is confirmed, and **5 common derived channels**. ToLiss landing
+sessions add **13 text/approach derived channels**: up to 57 signals for another
+aircraft or 80 for ToLiss. Only returned/derived values are
 uploaded. Engine 2 and jet N1 fields are meaningful only on appropriate aircraft.
 
 | Report purpose | Signals |
@@ -174,7 +176,7 @@ waits for S again. It does not pause the simulator.
 
 ## Finalization and recovery
 
-The realtime uploader drains the eight selected signals, appends the final batch, calls `cool()`,
+The realtime uploader drains the selected preview signals, appends the final batch, calls `cool()`,
 waits for `FINISHED`, and compares cold-storage signal counts and first/last
 receiver timestamps with `flight-NNN.jsonl` through Trino. Missing/incomplete
 signals are restored from **that sampled upload journal**, not the full-rate
@@ -276,3 +278,68 @@ synchronous; use the default console for timing independent of upload latency.
 
 Tested with X-Plane 11.55r2 on macOS and Python 3.13; X-Plane 10 is unverified.
 The project uses `fcntl` and `curses`; native Windows support is not implemented.
+
+
+## ILS scatter geometry
+
+The default ToLiss landing flow adds the plot signals listed in the README, using
+existing latitude, longitude, MSL altitude and flap-lever RREFs. Realtime now carries
+up to 19 signals; the full file has up to 80, including `ils_lateral_error_m`
+(positive right) and `ils_vertical_error_m` (positive above). Other aircraft keep
+their original eight-signal preview and numeric flap data.
+
+Reference constants live in `ApproachReference` in `xplane_approach.py`:
+
+- LEPA 06L threshold: 39.5471472° N, 2.7107278° E, from installed apt.dat.
+- PLM localizer: 39.563944444° N, 2.746277778° E; true course 58.483°.
+- Glideslope: 39.549916667° N, 2.713222222° E; elevation 9.144 m MSL; slope 3°.
+- Simulator data: X-Plane 11.55 NAV1150, cycle 1802, build 20200623. Defaults are
+  pinned for this fair setup; changing the airport, runway, scenery or navdata
+  requires reviewing these constants. This is not automatic runway discovery.
+
+The [X-Plane NAV1150 specification](https://developer.x-plane.com/wp-content/uploads/2020/03/XP-NAV1150-Spec.pdf)
+defines the navdata coordinates and encoded true course/glide angle. Challenge 18
+(file dataset 1198) confirms the 06L touchdown location/course and gives a visual
+comparison. Its recorded NAV1 frequency is 117.70 MHz, so that receiver's needle
+values were not used to calibrate PLM (110.90 MHz). The flown path is never fitted
+as the ideal approach.
+
+Coordinates use a local WGS84 chart projection with fixed latitude/longitude
+scales at the threshold. The localizer centre ray and two angular boundary rays
+are intersected with each aircraft latitude; their resulting longitudes are the
+three reference X signals sharing that latitude as Y. Thus an aircraft moving
+sideways does not move the reference corridor. The rays converge at the localizer
+antenna beyond the runway, not at the threshold. The illustrative default of
+210 m total width at the threshold is approximately the 700 ft full-scale width
+in the [FAA ILS description](https://www.faa.gov/air_traffic/publications/atpubs/aim_html/chap1_section_1.html).
+It is not a calibrated ToLiss needle model or a flight-performance limit.
+
+For vertical plots, remaining distance is the along-course horizontal distance to
+the threshold (not DME or travelled distance). The reference is glideslope antenna
+MSL elevation plus horizontal distance to its along-course position times tan(3°).
+The illustrative lower/upper rays use 3° ±0.35°; change `vertical_half_angle_deg`
+to choose a different training corridor. Aircraft and all three reference altitudes
+are MSL metres. With one shared Y, use remaining distance as Y and these four
+altitudes as X. These geometric references work even when the receiver is untuned;
+they do not claim that ILS reception, LOC capture or G/S capture is valid.
+
+Fresh coordinate groups are emitted together only after latitude, longitude and
+altitude have all updated, each within 0.5 s. The live sampler selects complete
+plot groups at LOW/HIGH rate. Reference output is limited to the local approach
+area (25 km before, 1.2 km after threshold, 5 km either side). Vertical references
+stop at the threshold, avoiding an invented below-runway glidepath during taxi.
+This model does not score flare, touchdown position, terrain clearance or radio
+propagation. Missing/out-of-area inputs are omitted rather than filled with zeros.
+
+Flap text maps nominal ToLiss lever ratios 0, .25, .5, .75, 1 to the requested five
+labels. The installed A319 XP11 definition has four equally spaced flap lever
+steps. Only values within .025 of a detent are labeled. The source is
+`AirbusFBW/FlapLeverRatio`, not actual deployment; it cannot distinguish CONF 1
+from automatic 1+F. This mapping is aircraft-specific and should be checked if the
+ToLiss version changes. Storage integration was tested with all five labels;
+this change did not command or move the simulator's flap lever.
+
+Numeric and text samples share the long Parquet layout (`time`, `signal`,
+`value`, `value_text`) with exactly one value column populated per sample. The
+SDK realtime append and repair paths preserve this typing. Cold-storage validation
+also compares per-text-value counts so losing labels cannot pass a count-only check.
