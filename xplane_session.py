@@ -18,6 +18,7 @@ from xplane_sampling import LiveSampler, ReportTelemetry, SAMPLE_MODES, LIVE_SIG
 from xplane_file_upload import FileUploadWorker, ParticipantUploadWorker, file_stream
 from xplane_tui import ConsoleInput, console_lines
 from xplane_approach import APPROACH_METADATA
+from xplane_pilot import PilotSetup, PROMPT
 from xplane_reset import LandingReset, POSITION_FIELDS, fresh_values, reset_packet
 
 ACROBATIC_PREFIX = "Marple_Acrobatic_"
@@ -75,10 +76,11 @@ class UploadWorker(threading.Thread):
 
 
 class SessionController:
-    def __init__(self,receiver,folder,stream=None,interval=1,duration=60,delay=5,auto_route=False,sample_mode='low',analysis_stream=None):
+    def __init__(self,receiver,folder,stream=None,interval=1,duration=60,delay=5,auto_route=False,sample_mode='low',analysis_stream=None,native_prompt=False):
         self.receiver=receiver;self.folder=folder;self.stream=stream;self.interval=interval
         self.analysis_stream=analysis_stream;self.file_worker=None;self.file_workers=[]
         self.completed_files=[];self.participant_jobs=[]
+        self.native_prompt=native_prompt;self.pilot_setup=None;self.pilot_name=None
         self.auto_route=auto_route;self.mode=None if auto_route else 'timed';self.aircraft=None
         self.sample_mode=sample_mode;self.active_sample_mode=sample_mode
         self.sampler=LiveSampler(sample_mode);self.report_telemetry=ReportTelemetry()
@@ -97,15 +99,17 @@ class SessionController:
         identity=self.receiver.identity.snapshot(now)
         if identity is None:
             if self.resetter.active:return  # PREL can briefly interrupt identity while loading.
-            if self.state in {'RECORDING','COUNTDOWN','WAITING'}:
+            if self.pilot_setup:self.pilot_setup.close();self.pilot_setup=None
+            if self.state in {'RECORDING','COUNTDOWN','WAITING','WAIT_PILOT'}:
                 self.stop(now,'aircraft identity unavailable')
             self.aircraft=None
             if self.state not in {'SAVING','ERROR'}:
                 self.state='WAIT_ID';self.message='Waiting for confirmed aircraft identity over UDP…'
             return
         if self.aircraft is not None and identity_key(identity)==identity_key(self.aircraft):return
+        if self.pilot_setup:self.pilot_setup.close();self.pilot_setup=None
         self.resetter.cancel()
-        if self.state in {'RECORDING','COUNTDOWN','WAITING'}:
+        if self.state in {'RECORDING','COUNTDOWN','WAITING','WAIT_PILOT'}:
             self.stop(now,'aircraft changed')
         if self.state=='SAVING':return  # Finish the old dataset before applying new metadata.
         self.aircraft=dict(identity);self.mode=aircraft_mode(identity)
@@ -125,6 +129,7 @@ class SessionController:
         self.session_manifest={'state':'CAPTURING','name':self.worker.name,
             'dataset_id':self.worker.flight.manifest.get('dataset_id'),
             'mode':self.mode,'aircraft':self.aircraft,
+            'participant_name':self.pilot_name,
             'live_sample_hz':self.sampler.hz,'local_capture_hz':10,
             'timer':LANDING_END_REASON if self.mode=='landing' else '60 wall-clock seconds',
             'start_monotonic':now}
@@ -150,6 +155,9 @@ class SessionController:
         if self.auto_route and self.aircraft is None:
             self.requested_start=True;self.state='WAIT_ID';return
         self.requested_start=False
+        pending_setup=self.pilot_setup if self.state=='WAIT_RESET' else None
+        if self.pilot_setup and pending_setup is None:self.pilot_setup.close()
+        self.pilot_setup=pending_setup;self.pilot_name=None
         if self.mode=='landing':
             self.landing_cycle=True;self.landing=LandingCut(LANDING_TAIL_SECONDS);self.reset_watch=AltitudeReset();self.reset_pending=False
         self.record_path=None;self.session_manifest={}
@@ -157,6 +165,10 @@ class SessionController:
         self.approach_start=None;self.resetter=LandingReset(self.receiver,self.log)
         self.worker=None;self.state='WAITING';self.message='Waiting for live, unpaused X-Plane telemetry…'
         self.countdown_until=None;self.timer=SessionTimer(self.duration)
+        if self.mode=='landing':self.begin_pilot()
+    def begin_pilot(self):
+        if self.pilot_setup is None:self.pilot_setup=PilotSetup(self.receiver,self.native_prompt)
+        self.state='WAIT_PILOT';self.message=PROMPT
     def prepare(self,now):
         self.number+=1
         namespace=f'stream:{self.stream.id}' if self.stream else 'local'
@@ -173,6 +185,7 @@ class SessionController:
             metadata.update({'X-Plane Aircraft':self.aircraft.get('description',''),
                              'X-Plane ICAO':self.aircraft.get('icao',''),'Session Mode':self.mode})
         if self.mode=='landing':metadata.update(APPROACH_METADATA)
+        if self.pilot_name:metadata['Participant Name']=self.pilot_name
         self.worker=UploadWorker(self.folder,self.number,name,self.stream,self.interval,self.log,metadata=metadata)
         self.worker.start();self.countdown_until=now+(0 if self.mode=='landing' else self.delay);self.state='COUNTDOWN'
         self.message='Get ready — recording starts after the countdown.'
@@ -192,6 +205,7 @@ class SessionController:
         self.log('Starting full-rate SDK file upload; realtime continues independently.')
 
     def stop(self,now,reason='operator stop'):
+        if self.pilot_setup:self.pilot_setup.close();self.pilot_setup=None
         if reason=='operator stop':
             self.landing_cycle=False;self.requested_start=False;self.reset_pending=False
             self.resetter.cancel()
@@ -201,7 +215,7 @@ class SessionController:
             self.start_file_upload(reason)
             if self.file_worker is not None:
                 self.completed_files.append({'id':str(self.file_worker.manifest_path),
-                    'worker':self.file_worker,'job':None})
+                    'worker':self.file_worker,'job':None,'auto_prompt':self.mode!='landing'})
             self.state='SAVING';self.message='Recording stopped. Uploading remaining data and finalizing Marple…'
             if self.record_file:self.record_file.close();self.record_file=None
             self.session_manifest.update(state='LOCAL_CAPTURE_COMPLETE',end_reason=reason,capture_complete=True)
@@ -210,7 +224,7 @@ class SessionController:
             if self.mode=='landing' and reason==LANDING_END_REASON:
                 self.resetter.begin(now,self.latest,self.approach_start)
                 self.save_reset_status()
-        elif self.state in {'WAITING','COUNTDOWN'}:
+        elif self.state in {'WAITING','COUNTDOWN','WAIT_PILOT'}:
             if self.worker:
                 self.worker.finish('cancelled before recording');self.state='SAVING'
             else:self.state='READY'
@@ -276,6 +290,8 @@ class SessionController:
             key=self.commands.get_nowait()
             if isinstance(key,tuple) and len(key)==3 and key[0]=='participant':
                 self.set_participant(key[1],key[2])
+            elif isinstance(key,tuple) and len(key)==3 and key[0]=='pilot':
+                if self.pilot_setup:self.pilot_setup.submit(key[1],key[2])
             elif key=='start':self.start(now)
             elif key=='stop':self.stop(now)
             elif key=='quit':self.exit_requested=True;self.stop(now)
@@ -286,11 +302,22 @@ class SessionController:
             self.resetter.cancel()
             self.log('UDP receiver failed: '+self.receiver.failure);self.stop(now,'UDP failure')
             if self.state not in {'SAVING','RECORDING'}:self.state='ERROR';self.message='UDP receiver failed. Restart the service.'
+        if self.state=='COUNTDOWN' and self.pilot_setup and self.pilot_setup.state=='READY' and self.worker.ready.is_set():
+            self.pilot_setup.close();self.pilot_setup=None
+        if self.pilot_setup:
+            self.pilot_setup.update(now,self.latest)
+            if self.state=='WAIT_PILOT':self.message=self.pilot_setup.message
+            if self.pilot_setup.state=='CANCELLED':self.stop(now)
+            elif self.pilot_setup.state=='READY' and self.state=='WAIT_PILOT':
+                self.pilot_name=self.pilot_setup.name
+                self.prepare(now)
+        if self.state=='COUNTDOWN' and self.pilot_setup and self.pilot_setup.state=='READY' and self.worker.ready.is_set():
+            self.pilot_setup.close();self.pilot_setup=None
         if self.state=='WAITING' and (not self.auto_route or self.aircraft is not None) and self.connected(now) and self.fresh('paused',now)==0 and self.fresh('replay',now)==0:self.prepare(now)
         if self.state=='COUNTDOWN':
             if not self.connected(now) or self.fresh('paused',now)!=0 or self.fresh('replay',now)!=0:
                 self.countdown_until=now+(0 if self.mode=='landing' else self.delay);self.message='Waiting for unpaused flight; countdown will restart.'
-            elif now>=self.countdown_until and self.worker.ready.is_set():
+            elif now>=self.countdown_until and self.worker.ready.is_set() and self.pilot_setup is None:
                 if self.worker.error:self.state='ERROR';self.message='Unable to prepare recording; see session.log.'
                 else:
                     self.begin_recording(now)
@@ -307,6 +334,8 @@ class SessionController:
             self.save_reset_status()
             if self.resetter.state=='COMPLETE':
                 self.reset_pending=True;self.reset_watch.landed=False
+                if self.landing_cycle and not self.exit_requested and self.pilot_setup is None:
+                    self.pilot_setup=PilotSetup(self.receiver,self.native_prompt)
         if self.state=='SAVING' and self.worker and self.worker.done.is_set():
             manifest=self.worker.flight.manifest if self.worker.flight else {}
             success=not self.worker.error and manifest.get('state') in {'FINISHED','LOCAL_CAPTURE_COMPLETE'} and not manifest.get('upload_status')
@@ -317,7 +346,7 @@ class SessionController:
                 if not success:self.message='Live finalization failed; SDK file has its own status above. Waiting for reset to 3,000 ft.'
         if self.state=='WAIT_RESET' and self.reset_pending and not self.exit_requested and not self.resetter.active:
             self.start(now)
-            self.message='3,000 ft reset detected. Finish ISCS setup, then unpause to start the next recording.'
+            self.message='3,000 ft reset detected. Enter the next pilot name, finish ISCS setup, then unpause.'
         if self.exit_requested and self.state not in {'SAVING','RECORDING','COUNTDOWN'}:
             if all(w.done.is_set() for w in self.file_workers+self.participant_jobs):self.closed=True
             else:self.message='Waiting for SDK file uploads before exiting…'
@@ -326,9 +355,17 @@ class SessionController:
         analysis=self.file_worker or (self.file_workers[-1] if self.file_workers else None)
         return {'state':self.state,'connected':self.connected(now),'signals':len(self.seen),
                 'exiting':self.exit_requested,'reset_state':self.resetter.state,
+                'pilot_name':self.pilot_name,
+                'worker_ready':bool(self.worker and self.worker.ready.is_set()),
+                'pilot_prompt':({'id':self.pilot_setup.id,'name':PROMPT,'kind':'pilot','participant':'',
+                    'native_active':self.pilot_setup.dialog.process is not None}
+                    if self.pilot_setup and self.pilot_setup.state=='INPUT' else None),
                 'completed':[{'id':e['id'],'name':e['worker'].manifest['name'],
-                    'participant':e['job'].name if e['job'] else '',
-                    'name_status':e['job'].state if e['job'] else 'UNNAMED'} for e in self.completed_files],
+                    'auto_prompt':e.get('auto_prompt',True),
+                    'participant':e['job'].name if e['job'] else e['worker'].metadata.get('Participant Name',''),
+                    'name_status':e['job'].state if e['job'] else
+                        ({'FINISHED':'SAVED','LOCAL_FILE_READY':'LOCAL','ERROR':'ERROR'}.get(e['worker'].manifest['state'],'WAITING')
+                         if e['worker'].metadata.get('Participant Name') else 'UNNAMED')} for e in self.completed_files],
                 'analysis_name':analysis.manifest['name'] if analysis else '',
                 'analysis_state':analysis.manifest['state'] if analysis else '',
                 'live_signals':len(self.sampler.last_bucket),'touchdown':self.landing.touchdown is not None,
@@ -342,6 +379,7 @@ class SessionController:
                 'cloud_failed':bool(self.worker and (self.worker.error or (flight and flight.failed))),'message':self.message,'events':list(self.events),
                 'pause': self.resetter.message if self.mode=='landing' else 'automatic pause disabled'}
     def close(self):
+        if self.pilot_setup:self.pilot_setup.close()
         if self.record_file:self.record_file.close()
         for worker in self.file_workers+self.participant_jobs:
             while worker.is_alive():worker.join(timeout=.5)
@@ -409,7 +447,7 @@ def main():
         datasets=list(stream.get_datasets())+list(analysis_stream.get_datasets())
         minimum_numbers={prefix:next_remote_number(datasets,prefix) for prefix in [CHALLENGE_PREFIX,ACROBATIC_PREFIX]}
     receiver=Receiver(args.host,args.port,10,folder,args.data_port,include_data=args.include_data)
-    controller=SessionController(receiver,folder,stream,args.flush_seconds,auto_route=True,sample_mode=args.sample_mode,analysis_stream=analysis_stream);controller.minimum_numbers=minimum_numbers
+    controller=SessionController(receiver,folder,stream,args.flush_seconds,auto_route=True,sample_mode=args.sample_mode,analysis_stream=analysis_stream,native_prompt=True);controller.minimum_numbers=minimum_numbers
     receiver.thread.start();thread=threading.Thread(target=controller_loop,args=(controller,),daemon=True);thread.start()
     try:curses.wrapper(draw_console,controller)
     except KeyboardInterrupt:pass

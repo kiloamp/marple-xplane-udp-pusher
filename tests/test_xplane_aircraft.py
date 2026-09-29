@@ -54,6 +54,15 @@ class FakeWorker:
         self.reason=reason;self.flight.manifest['state']='FINISHED';self.done.set()
 
 
+class CollectedPilot:
+    """Keep legacy flight-timing tests focused; real pilot gating has separate tests."""
+    def __init__(self,*args):
+        self.state='READY';self.name='Test pilot';self.id='test'
+        self.message='Test pilot collected';self.dialog=SimpleNamespace(process=None)
+    def update(self,*args):pass
+    def close(self):pass
+
+
 class RoutingTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.folder=Path(self.temp.name)
@@ -61,8 +70,9 @@ class RoutingTests(unittest.TestCase):
         self.controller=SessionController(self.receiver,self.folder,auto_route=True)
         self.controller.sequence_path=self.folder/'sequence.json'
         self.worker_patch=patch('xplane_session.UploadWorker',FakeWorker);self.worker_patch.start()
+        self.pilot_patch=patch('xplane_session.PilotSetup',CollectedPilot);self.pilot_patch.start()
     def tearDown(self):
-        self.worker_patch.stop();self.controller.close();self.temp.cleanup()
+        self.worker_patch.stop();self.pilot_patch.stop();self.controller.close();self.temp.cleanup()
     def feed(self,now,ground=0,compression=0,alt=914.4):
         self.controller.feed(int(now*1e9),now,{'paused':0,'replay':0,'on_ground':ground,'altitude_msl_m':alt,'gear_0_compression_m':compression,'latitude_deg':39.55,'longitude_deg':2.73,'heading_true_deg':90,'true_airspeed_mps':75})
     def test_waits_for_identity_instead_of_mislabelling(self):
@@ -99,7 +109,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(self.receiver.sock.sendto.call_args.args[0][:4],b'PREL')
         c.feed(112_200_000_000,112.2,{'paused':1,'replay':0,'altitude_msl_m':914.4,
             'latitude_deg':39.55,'longitude_deg':2.73})
-        c.tick(112.2);self.assertEqual(c.state,'WAITING')
+        c.tick(112.2);self.assertEqual(c.state,'WAIT_PILOT')
         self.assertIn('ISCS',c.message)
         self.assertEqual(self.receiver.sock.sendto.call_count,2)
         self.feed(113);c.tick(113)
@@ -140,7 +150,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(self.receiver.sock.sendto.call_count,2)
         self.receiver.identity.snapshot.return_value=TOLISS
         old.done.set();old.flight.manifest['state']='FINISHED';c.tick(112.3)
-        self.assertEqual(c.state,'WAITING')
+        self.assertEqual(c.state,'WAIT_PILOT')
         self.assertIn('ISCS',c.message)
 
     def test_file_ready_even_when_live_finalization_fails(self):

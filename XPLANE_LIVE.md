@@ -159,8 +159,8 @@ not loaded. Timed mode remains unchanged and does not pause or reposition.
 X/Q cancels pending automatic reset commands. Aircraft changes cancel them too.
 The automatic reset is independent of live finalization and SDK file upload.
 If a command cannot be confirmed, use X-Plane/ISCS manually; inspect the session
-manifest's `automatic_reset` status. A confirmed reset waits for manual unpause
-before a new recording begins.
+manifest's `automatic_reset` status. A confirmed reset prompts for the next pilot, then waits for recording readiness
+and manual unpause before a new recording begins.
 
 For manual reset detection, an upward altitude jump of at least 1000 ft arms a 15-second
 reset window so situation loading and delayed ground-contact updates can settle.
@@ -211,16 +211,32 @@ It remains type `files`, with `Capture Type: SDK upload`. Realtime preview names
 are `<session-name>.live`. Sequence numbering recognises clean names and historic
 `.parquet`/`.live` names. Existing datasets are not renamed.
 
-After recording ends, the compact console asks for a participant name (Enter saves,
-Esc skips). It updates **Participant Name** on the SDK file dataset via
-`Dataset.update_metadata`, preserving existing metadata, then reads it back to
-confirm. The worker waits for file upload completion and retains that flight's
-identity even during the next recording. The original Parquet binary is not
-rewritten; local manifests and `raw-NNN.participant.json` retain the name/status.
-N edits the last completed flight or retries a failed update; D toggles diagnostic
-information. Submitted updates finish before Q exits; unanswered prompts do not
-block exit. Failed/pending updates are retained locally, but not automatically
-replayed after a service restart.
+Landing challenges collect **Participant Name before recording**. On first startup
+and after a confirmed 3000 ft reset, fresh paused/non-replay telemetry opens the
+macOS dialog “New landing challenge, input pilot name”. The dialog uses a separate
+`osascript` process polled without blocking capture, reset or cloud workers. The
+previous flight may still be cooling while the next name is entered; a unique
+setup ID binds each response to the correct upcoming flight. Late responses to a
+cancelled setup are rejected. Names are not carried over between challenges.
+
+If X-Plane is running, a pause toggle is sent once and must receive a newer paused
+acknowledgement. No blind retries occur after a 3 s timeout; the console requests
+manual pause. Unpausing before entry/setup completes re-enters the pause gate.
+A valid name prepares the next live dataset with its metadata while still paused.
+The operator finishes ISCS and unpauses only once the recorder is ready; then the
+recording timer starts. The name also travels with the raw snapshot into the
+original Parquet metadata and SDK upload. No post-flight name dialog opens for
+landing challenges. Cancel/Stop/Q or aircraft changes discard the pending setup;
+Cancel keeps the sim paused. S starts another attempt.
+
+The fallback terminal prompt requires a nonempty name (1–80 printable characters);
+Enter submits and Esc cancels. Native dialog failure falls back to this terminal
+prompt. Timed sessions keep post-flight entry. N corrects a completed analysis
+file's name via `Dataset.update_metadata`, preserving other metadata and reading
+it back for confirmation; that correction does not rewrite the original binary or
+live metadata. Local manifests and `raw-NNN.participant.json` retain corrections
+and their status. Q waits for submitted corrections, but not unanswered prompts.
+Failed/pending corrections are not automatically replayed after restarting.
 
 Each SDK upload contains one `Flight Review` metadata string, selected from ten
 templates. The review is computed from the immutable raw snapshot before upload,

@@ -8,7 +8,7 @@ live uploads, and finalizes and verifies each completed dataset.
 
 | Aircraft | Recording flow | Dataset name |
 | --- | --- | --- |
-| ToLiss Airbus | Automatic recording; full file upload at first gear compression; live ends after 10 seconds; pause and reset to approach start at 3000 ft; manual ISCS/unpause | `A320_Landing_Challenge_XXX` |
+| ToLiss Airbus | Enter pilot name while paused, then unpause to record; full file upload at first gear compression; live ends after 10 seconds; pause and reset to approach start at 3000 ft; manual ISCS/unpause | `A320_Landing_Challenge_XXX` |
 | Any other aircraft | Press S; 5-second preparation; 60-second flight; warning at 10 seconds remaining; stop and upload full file | `Marple_Acrobatic_XXX` |
 
 Both modes use `X-Plane Fair Live` for the preview and `X-Plane Flight Files` for
@@ -126,8 +126,8 @@ At the landing cutoff, the service requests pause, waits for confirmation, then
 sends native UDP `PREL` to return to the approach's first captured airborne
 position, heading and true airspeed at **3000 ft MSL**. It confirms the reset and
 paused state (re-pausing only if fresh telemetry shows PREL resumed the sim).
-Finish the ToLiss ISCS setup yourself and **unpause manually** to start the next
-recording. This does not load a ToLiss scenario or restore its system configuration.
+Enter the next pilot’s name in the pop-up, finish the ToLiss ISCS setup yourself,
+then **unpause manually once the recorder is ready** to start the next recording. This does not load a ToLiss scenario or restore its system configuration.
 Missing/stale telemetry or a failed reset is logged for manual handling; commands
 are not blindly retried. X/Q and early manual resets do not trigger repositioning.
 
@@ -147,21 +147,34 @@ same base name with **`.live`**, for example `A320_Landing_Challenge_001.live`.
 The local analysis payload retains its normal `.parquet` extension. These names
 apply to new flights; existing datasets are unchanged.
 
-When recording finishes, the console asks for the participant's name. **Enter**
-saves it as **Participant Name** metadata on that flight's SDK analysis dataset;
-**Esc** skips. Names can contain accents and spaces (up to 80 characters). While
-entering a name, shortcut letters are treated as text; **Ctrl+C** still quits safely.
-Press **N** afterward to edit the latest completed flight or retry a failed update.
-The prompt identifies its flight, even if the next recording starts meanwhile.
+Before each **landing challenge**, including the first one, the recorder waits for
+confirmed paused telemetry and opens a macOS pop-up:
+**“New landing challenge, input pilot name”**. After the automatic 3000 ft reset,
+the prompt can appear while the previous flight is still finishing its upload.
+Enter a name and click **Ready**; finish ISCS setup, wait for the recorder to be
+ready, then **unpause manually**. Name-entry and paused setup time are excluded
+from the next flight's recording duration. If the sim is running before name entry,
+the recorder requests pause and waits for confirmation. It never auto-unpauses.
 
-The file upload still starts immediately at touchdown. Name entry and its metadata
-update run independently of recording/reset; if the file is still uploading, the
-name waits for it. The console says “saved to Marple” only after a read-back confirms
-it. Names are added to **dataset metadata**, without re-uploading or rewriting the
-original Parquet binary. They are also retained in the local analysis manifest and
-`raw-NNN.participant.json`; local-only mode saves them locally. A failed update
-shows a retry notice. Pending/failed names survive on disk but are not automatically
-resubmitted after restarting the service. Unanswered prompts do not block quitting.
+The name is saved as **Participant Name** in the upcoming live dataset, analysis
+dataset, local session manifest and original Parquet metadata. Every landing
+challenge starts with a fresh name prompt; the previous pilot is never reused.
+There is **no automatic post-landing name prompt** for the landing challenge.
+
+Names accept accents and spaces (1–80 printable characters). **Cancel** leaves the
+sim paused and cancels that challenge; press S to try again. If the native pop-up
+is unavailable, Terminal shows the same prompt: Enter submits, Esc cancels, and
+Ctrl+C quits safely. Letters such as Q are text while entering a name. Quit/Stop
+or an aircraft change closes any pending dialog and discards its unfinished entry.
+
+Timed sessions for other aircraft retain their post-flight name prompt (Enter
+saves, Esc skips). **N** can still correct the name on a completed analysis dataset,
+or retry a failed correction. Corrections wait for file upload completion, merge
+metadata and confirm it by reading it back; they do not rewrite the original
+Parquet binary or change the live dataset. Corrections are retained in the local
+analysis manifest and `raw-NNN.participant.json`; local-only mode saves locally.
+Failed/pending corrections survive on disk but are not automatically resubmitted
+after restarting. Quitting waits for submitted corrections, not unanswered prompts.
 
 Each new SDK file receives a **Flight Review** metadata field. One of ten
 templates is selected from measured speed variation, bank, gear-handle timing,

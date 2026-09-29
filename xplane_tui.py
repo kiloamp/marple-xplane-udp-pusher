@@ -14,8 +14,14 @@ class ConsoleInput:
         if status['exiting']:
             self.target = None
             return
+        prompt = status.get('pilot_prompt')
+        if self.target and self.target.get('kind') == 'pilot' and (not prompt or prompt['id'] != self.target['id']):
+            self.target = None
+        if prompt and not prompt['native_active'] and prompt['id'] not in self.seen:
+            self.seen.add(prompt['id']);self.open(prompt)
+            return
         if self.target is None:
-            entry = next((e for e in status['completed'] if e['id'] not in self.seen), None)
+            entry = next((e for e in status['completed'] if e.get('auto_prompt',True) and e['id'] not in self.seen), None)
             if entry:
                 self.seen.add(entry['id'])
                 self.open(entry)
@@ -31,13 +37,15 @@ class ConsoleInput:
             return 'quit'
         if self.target is not None:
             if key == '\x1b':
+                preflight = self.target.get('kind') == 'pilot'
                 self.target = None
+                if preflight:return 'stop'
             elif key in ('\n', '\r', curses.KEY_ENTER):
                 if self.text.strip():
-                    result = ('participant', self.target['id'], self.text.strip())
+                    result = ('pilot' if self.target.get('kind') == 'pilot' else 'participant', self.target['id'], self.text.strip())
                     self.target = None
                     return result
-                self.error = 'Enter a name, or press Esc to skip.'
+                self.error = 'Enter a name, or press Esc to cancel.' if self.target.get('kind') == 'pilot' else 'Enter a name, or press Esc to skip.'
             elif key in ('\x7f', '\b', curses.KEY_BACKSPACE):
                 self.text = self.text[:-1]
                 self.error = ''
@@ -51,6 +59,8 @@ class ConsoleInput:
         if key == 'd':
             self.details = not self.details
         elif key == 'n':
+            if status.get('pilot_prompt'):
+                self.open(status['pilot_prompt']);return None
             available = [e for e in status['completed'] if e['name_status'] not in ('WAITING', 'SAVING')]
             if available:
                 self.open(next((e for e in available if e['name_status'] == 'ERROR'), available[-1]))
@@ -68,7 +78,9 @@ def console_lines(s, editor):
     elif state == 'RECORDING':
         action = (f"Touchdown! Reset in {s['remaining']:.0f}s." if s['touchdown'] else 'Recording — fly your approach.') if s['mode'] == 'landing' else f"Recording — {s['remaining']:.0f} seconds left."
     elif state == 'COUNTDOWN':
-        action = f"Get ready — starting in {s['countdown']:.0f}s." if s['countdown'] else 'Preparing recording…'
+        action = ('Pilot saved. Finish ISCS setup, then unpause to fly.' if s.get('worker_ready') else 'Preparing recording — keep X-Plane paused.') if s['mode']=='landing' else f"Get ready — starting in {s['countdown']:.0f}s."
+    elif state == 'WAIT_PILOT':
+        action = s['message']
     elif s['reset_state'] in ('WAIT_PAUSE', 'WAIT_POSITION', 'WAIT_REPAUSE'):
         action = 'Pausing and resetting to 3,000 ft…'
     elif state == 'WAITING':
@@ -88,10 +100,15 @@ def console_lines(s, editor):
                   'VERIFYING': 'Checking upload', 'IMPORTING': 'Processing in Marple',
                   'UPLOADING': 'Uploading', 'PREPARING': 'Preparing file'}.get(s['analysis_state'], 'Available after landing' if s['mode'] == 'landing' else 'Available after the flight')
     lines = ['MARPLE FLIGHT RECORDER', mode, action, '']
+    if s.get('pilot_name') and state in ('COUNTDOWN','RECORDING'):
+        lines += ['Pilot: ' + s['pilot_name'], '']
+    if s.get('pilot_prompt') and s['pilot_prompt']['native_active']:
+        lines += ['Enter the next pilot name in the pop-up. X-Plane stays paused.', '']
     if editor.target:
-        lines += ['Flight finished: ' + editor.target['name'],
+        preflight = editor.target.get('kind') == 'pilot'
+        lines += [editor.target['name'] if preflight else 'Flight finished: ' + editor.target['name'],
                   'Your name: ' + editor.text[-50:] + '▏',
-                  editor.error or 'Enter: save name   Esc: skip   Ctrl+C: quit safely', '']
+                  editor.error or ('Enter: ready   Esc: cancel   Ctrl+C: quit safely' if preflight else 'Enter: save name   Esc: skip   Ctrl+C: quit safely'), '']
     lines += ['Live: ' + s['dataset'],
               'Analysis: ' + file_state,
               '  ' + s['analysis_name'] if s['analysis_name'] else '']
