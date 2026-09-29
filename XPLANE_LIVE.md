@@ -126,7 +126,7 @@ for a confirmed ToLiss and cancelled when that identity is lost or changed.
 | ToLiss Airbus | Full file upload at compression; live +10 s; pause/reset; manual ISCS/unpause | Airbus A320 | A320_Landing_Challenge_XXX |
 | Any other aircraft | S → 5 s preparation → 60 s flight → full file upload | Marple Acrobatic | Marple_Acrobatic_XXX |
 
-Both use `X-Plane Fair Live` previews and `X-Plane Flight Files` analysis files,
+Both reuse the `Toulouse Live Fair Day 1` preview and `X-Plane Flight Files` analysis files,
 with metadata `Capture Type: Live` / `Capture Type: SDK upload`, separate dataset
 IDs and matching session names. They retain independent sequence counters,
 Departure Airport `LEPA`, and Flight Type `Simulator Session`. The installed A319
@@ -139,8 +139,8 @@ Landing detection arms after one observed second airborne with fresh running,
 non-replay telemetry. The **first gear compression over 0.1 mm** latches touchdown;
 bounces do not restart the timer. The first compression packet is included in an
 immutable full-rate file snapshot, uploaded immediately on a separate worker.
-**Ten wall-clock seconds later** realtime recording stops and the preview
-is cooled. Landing mode requests pause and then a reset to 3000 ft MSL.
+**Ten wall-clock seconds later** the realtime flight segment stops and its final
+batch is flushed; the shared preview stays LIVE. Landing mode requests pause and then a reset to 3000 ft MSL.
 The user can taxi during upload; the file ends at first touchdown, while the
 local session journal and live preview include the following 10 seconds.
 
@@ -171,16 +171,24 @@ An aircraft change ends the old capture before applying new metadata.
 
 Timed mode sends `START` via ALRT, then `10 seconds to go` at 50 seconds. Its
 60-second timer includes simulator pauses and dialogs: dismiss alerts promptly.
-It stops at the deadline, starts its SDK file upload and finalizes realtime, then
+It stops at the deadline, starts its SDK file upload and flushes its realtime segment, then
 waits for S again. It does not pause the simulator.
 
 ## Finalization and recovery
 
-The realtime uploader drains the selected preview signals, appends the final batch, calls `cool()`,
-waits for `FINISHED`, and compares cold-storage signal counts and first/last
-receiver timestamps with `flight-NNN.jsonl` through Trino. Missing/incomplete
-signals are restored from **that sampled upload journal**, not the full-rate
-session journal, so repair does not silently turn LOW into HIGH.
+The default console reuses one realtime stream and one dataset named
+`Toulouse Live Fair Day 1`. Startup looks up the exact stream name and dataset
+path and reuses its ID. Duplicate names or a non-LIVE dataset cause a startup
+error; the recorder does not silently create a replacement selection.
+`--live-name` selects a different day’s preview. Run only one producer per preview.
+
+At every flight cutoff (and on Q), the uploader drains and flushes the segment,
+then closes its local journal with `LIVE_SEGMENT_COMPLETE`. It never calls
+`cool()` or per-signal replacement repair on this shared dataset. Its LIVE status
+and accumulated history survive between flights and service restarts. Append
+pacing is shared across segments. Failed/uncertain batches remain in local journals
+and are not blindly replayed. The full analysis file is uploaded independently.
+The explicit legacy `--landing-mode` still cools/verifies each per-flight preview.
 
 The independent SDK worker copies only journal bytes committed at the trigger to
 `raw-NNN.jsonl`, writes `<session-name>.parquet`, and calls `push_file()` on the
@@ -191,14 +199,14 @@ descriptions, and verifies all signal counts and time bounds through Trino witho
 repair. Its own `raw-NNN.json` manifest records the analysis dataset ID and status.
 File verification permits at most 128 ns of timestamp rounding observed in the
 Marple Parquet importer; all sample counts must match exactly. Local Parquet and
-JSONL timestamps remain exact, and realtime verification retains zero tolerance.
+JSONL timestamps remain exact; the shared realtime preview is not cold-verified.
 
 Open the **SDK upload** dataset for analysis once it is `FINISHED`; it has no live
-lifecycle and does not depend on the live preview cooling successfully. The console
+lifecycle and does not depend on the shared live preview ending. The console
 shows its status independently. A failed or uncertain file upload is not blindly
 retried; the local file remains available. X/Q, aircraft changes or an early reset
 before touchdown upload the capture collected so far. Q waits for file workers as
-well as live finalization. Credentials and all `outputs/` recordings stay out of Git.
+well as flushing the live segment (without cooling the shared preview). Credentials and all `outputs/` recordings stay out of Git.
 
 The format and file-stream configuration follow the
 [Marple file plugin documentation](https://docs.marpledata.com/docs/marple-db/datastreams/supported-file-types).
@@ -207,22 +215,23 @@ The format and file-stream configuration follow the
 
 Local files remain `<session-name>.parquet`; SDK `push_file(file_name=...)` gives
 the uploaded analysis dataset the clean `<session-name>` name, without a suffix.
-It remains type `files`, with `Capture Type: SDK upload`. Realtime preview names
-are `<session-name>.live`. Sequence numbering recognises clean names and historic
+It remains type `files`, with `Capture Type: SDK upload`. The realtime preview is always
+`Toulouse Live Fair Day 1` by default, with `Capture Type: Live` and no per-pilot metadata. Sequence numbering recognises clean names and historic
 `.parquet`/`.live` names. Existing datasets are not renamed.
 
 Landing challenges collect **Participant Name before recording**. On first startup
 and after a confirmed 3000 ft reset, fresh paused/non-replay telemetry opens the
 macOS dialog “New landing challenge, input pilot name”. The dialog uses a separate
 `osascript` process polled without blocking capture, reset or cloud workers. The
-previous flight may still be cooling while the next name is entered; a unique
+previous flight may still be uploading while the next name is entered; a unique
 setup ID binds each response to the correct upcoming flight. Late responses to a
 cancelled setup are rejected. Names are not carried over between challenges.
 
 If X-Plane is running, a pause toggle is sent once and must receive a newer paused
 acknowledgement. No blind retries occur after a 3 s timeout; the console requests
 manual pause. Unpausing before entry/setup completes re-enters the pause gate.
-A valid name prepares the next live dataset with its metadata while still paused.
+A valid name prepares the next local flight segment and analysis metadata while still paused;
+the shared live dataset is reused without changing its day-level metadata.
 The operator finishes ISCS and unpauses only once the recorder is ready; then the
 recording timer starts. The name also travels with the raw snapshot into the
 original Parquet metadata and SDK upload. No post-flight name dialog opens for

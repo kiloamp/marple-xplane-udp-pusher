@@ -20,6 +20,7 @@ from xplane_tui import ConsoleInput, console_lines
 from xplane_approach import APPROACH_METADATA
 from xplane_pilot import PilotSetup, PROMPT
 from xplane_reset import LandingReset, POSITION_FIELDS, fresh_values, reset_packet
+from xplane_shared_live import DEFAULT_LIVE_NAME, SharedLiveError, open_shared_preview
 
 ACROBATIC_PREFIX = "Marple_Acrobatic_"
 LANDING_TAIL_SECONDS = 10.0
@@ -57,7 +58,8 @@ class UploadWorker(threading.Thread):
         self.finish_reason=None
     def run(self):
         try:
-            self.flight=Flight(self.folder,self.number,self.stream,f'{self.name}.live',log=self.log,metadata=self.metadata)
+            preview_name=self.stream.preview_name if getattr(self.stream,'shared_live',False) is True else f'{self.name}.live'
+            self.flight=Flight(self.folder,self.number,self.stream,preview_name,log=self.log,metadata=self.metadata)
             self.ready.set();last=time.monotonic()
             while True:
                 try:job=self.jobs.get(timeout=.05)
@@ -338,12 +340,12 @@ class SessionController:
                     self.pilot_setup=PilotSetup(self.receiver,self.native_prompt)
         if self.state=='SAVING' and self.worker and self.worker.done.is_set():
             manifest=self.worker.flight.manifest if self.worker.flight else {}
-            success=not self.worker.error and manifest.get('state') in {'FINISHED','LOCAL_CAPTURE_COMPLETE'} and not manifest.get('upload_status')
+            success=not self.worker.error and manifest.get('state') in {'FINISHED','LOCAL_CAPTURE_COMPLETE','LIVE_SEGMENT_COMPLETE'} and not manifest.get('upload_status')
             self.state='COMPLETE' if success else 'ERROR'
-            self.message='Realtime ended. Open the SDK analysis file once its status is FINISHED. Press S for another session.' if success and self.stream else ('Local session saved. Press S for another session.' if success else 'Live finalization failed. SDK analysis file has its own status above; local data retained.')
+            self.message='Flight saved. Open the SDK analysis file once FINISHED. Press S for another session.' if success and self.stream else ('Local session saved. Press S for another session.' if success else 'Live upload failed. SDK analysis file has its own status above; local data retained.')
             if self.mode=='landing' and self.landing_cycle and self.aircraft is not None:
-                self.state='WAIT_RESET';self.message='Realtime ended. Use the SDK upload for analysis; reset to 3,000 ft for the next flight.'
-                if not success:self.message='Live finalization failed; SDK file has its own status above. Waiting for reset to 3,000 ft.'
+                self.state='WAIT_RESET';self.message='Flight complete. Use the SDK file for analysis; waiting for the next 3,000 ft reset.'
+                if not success:self.message='Live upload failed; SDK file has its own status above. Waiting for reset to 3,000 ft.'
         if self.state=='WAIT_RESET' and self.reset_pending and not self.exit_requested and not self.resetter.active:
             self.start(now)
             self.message='3,000 ft reset detected. Enter the next pilot name, finish ISCS setup, then unpause.'
@@ -372,7 +374,7 @@ class SessionController:
                 'sample_mode':self.sample_mode,'active_sample_mode':self.active_sample_mode,
                 'mode':self.mode or 'detecting','aircraft':(self.aircraft or {}).get('description','Waiting for UDP identity'),
                 'remaining':(max(0,self.landing.touchdown+self.landing.tail-now) if self.landing.touchdown is not None else self.landing.tail) if self.mode=='landing' else self.timer.remaining(now),'countdown':max(0,(self.countdown_until or now)-now),
-                'dataset':flight.manifest['name'] if flight else '—',
+                'dataset':flight.manifest['name'] if flight else (self.stream.preview_name if getattr(self.stream,'shared_live',False) is True else '—'),
                 'analysis':(f"{analysis.manifest['state']} | dataset={analysis.manifest.get('dataset_id','—')} | {analysis.manifest['name']}" if analysis else 'Waiting for touchdown' if self.mode=='landing' else 'Waiting for session end'),
                 'uploaded':flight.manifest.get('confirmed_uploaded_packets',0) if flight else 0,
                 'queue':self.worker.jobs.qsize() if self.worker else 0,
@@ -434,6 +436,7 @@ def main():
     ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('--host',default='127.0.0.1');ap.add_argument('--port',type=int,default=49000)
     ap.add_argument('--data-port',type=int,default=49005);ap.add_argument('--flush-seconds',type=float,default=1)
     ap.add_argument('--sample-mode',choices=['low','high'],default='low')
+    ap.add_argument('--live-name',default=DEFAULT_LIVE_NAME,help='Persistent live preview name; reuse the same name across restarts')
     ap.add_argument('--include-data',action='store_true',help='Opt in to legacy checkbox-selected DATA capture')
     ap.add_argument('--local-only',action='store_true');args=ap.parse_args()
     if args.flush_seconds<=0:ap.error('Upload interval must be positive')
@@ -441,8 +444,7 @@ def main():
     stream=None;analysis_stream=None;minimum=1;minimum_numbers={}
     if not args.local_only:
         from xplane_marple import get_sdk_db
-        db=get_sdk_db();streams=[s for s in db.get_streams() if s.name=='X-Plane Fair Live']
-        stream=streams[0] if streams else db.create_stream('X-Plane Fair Live',type='realtime',description='Timed simulator sessions')
+        db=get_sdk_db();stream=open_shared_preview(db,args.live_name)
         analysis_stream=file_stream(db)
         datasets=list(stream.get_datasets())+list(analysis_stream.get_datasets())
         minimum_numbers={prefix:next_remote_number(datasets,prefix) for prefix in [CHALLENGE_PREFIX,ACROBATIC_PREFIX]}
@@ -463,6 +465,8 @@ def main():
 
 if __name__=='__main__':
     try:main()
+    except SharedLiveError as exc:
+        print(str(exc));raise SystemExit(1) from None
     except Exception as exc:
         print('Unable to run session console ('+type(exc).__name__+'). Check .env.local, network access and session.log.')
         raise SystemExit(1) from None

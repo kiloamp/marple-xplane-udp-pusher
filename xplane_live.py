@@ -313,6 +313,7 @@ class Receiver:
 class Flight:
     def __init__(self, folder: Path, number: int, stream=None, dataset_name=None, log=print, metadata=None):
         self.log = log
+        self.shared_stream = stream if getattr(stream, "shared_live", False) is True else None
         self.metadata = dict(FLIGHT_METADATA if metadata is None else metadata)
         self.path = folder / f"flight-{number:03d}.jsonl"
         self.file = self.path.open("x", buffering=1)
@@ -388,9 +389,10 @@ class Flight:
                     self.defined_signals.update(new_names)
                 # Server confirmed: at most one append per second. Pace from the
                 # previous response so network jitter/final flush cannot cause bursts.
-                time.sleep(max(0, self.next_append - time.monotonic()))
+                pacing = self.shared_stream if self.shared_stream is not None else self
+                time.sleep(max(0, pacing.next_append - time.monotonic()))
                 self.dataset.append(pd.DataFrame(rows), shape="long")
-                self.next_append = time.monotonic() + 1.05
+                pacing.next_append = time.monotonic() + 1.05
             except BaseException as exc:
                 # An HTTP timeout can mean the batch was accepted. Do not blindly retry.
                 self.failed = True
@@ -401,7 +403,11 @@ class Flight:
                 self.save()
                 if not isinstance(exc, Exception):
                     raise
-                self.log("Live append interrupted; local capture continues. Cold storage will be reconciled at flight end.", flush=True)
+                self.log("Live append interrupted; local capture continues. " +
+                         ("The separate SDK file remains available for analysis." if self.shared_stream is not None else
+                          "Cold storage will be reconciled at flight end."), flush=True)
+                if self.shared_stream is not None:
+                    self.shared_stream.next_append = time.monotonic() + 1.05
                 return
             self.manifest["confirmed_uploaded_packets"] = self.manifest.get("confirmed_uploaded_packets", 0) + len(self.pending)
         self.pending.clear()
@@ -423,6 +429,15 @@ class Flight:
                 self.log("Local flight saved; Marple setup requires recovery.", flush=True)
                 return
             self.flush()
+            if self.shared_stream is not None:
+                # Cooling or repairing from this segment would close or overwrite
+                # the preview used by every other flight in the fair day.
+                self.manifest["state"] = "LIVE_SEGMENT_COMPLETE"
+                if self.failed:
+                    self.manifest["upload_status"] = "APPEND_UNCONFIRMED"
+                self.save()
+                self.log("Flight segment saved; shared live preview stays open.", flush=True)
+                return
             if self.dataset is not None:
                 self.manifest["state"] = "COOLING_REQUESTED"
                 self.save()

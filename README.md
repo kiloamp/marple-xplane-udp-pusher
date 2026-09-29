@@ -1,19 +1,19 @@
 # X-Plane UDP → Marple Live Recorder
 
-Stream X-Plane telemetry to Marple DB, with separate live and analysis datasets per flight. The Python
+Stream X-Plane telemetry to Marple DB, with one persistent live preview and separate analysis datasets per flight. The Python
 service receives native UDP RREF/DATA packets, keeps a local journal, batches
-live uploads, and finalizes and verifies each completed dataset.
+live uploads, and finalizes and verifies each completed analysis file.
 
 ## Flight modes
 
 | Aircraft | Recording flow | Dataset name |
 | --- | --- | --- |
-| ToLiss Airbus | Enter pilot name while paused, then unpause to record; full file upload at first gear compression; live ends after 10 seconds; pause and reset to approach start at 3000 ft; manual ISCS/unpause | `A320_Landing_Challenge_XXX` |
+| ToLiss Airbus | Enter pilot name while paused, then unpause to record; full file upload at first gear compression; live segment ends after 10 seconds; pause and reset to approach start at 3000 ft; manual ISCS/unpause | `A320_Landing_Challenge_XXX` |
 | Any other aircraft | Press S; 5-second preparation; 60-second flight; warning at 10 seconds remaining; stop and upload full file | `Marple_Acrobatic_XXX` |
 
-Both modes use `X-Plane Fair Live` for the preview and `X-Plane Flight Files` for
+Both modes reuse **`Toulouse Live Fair Day 1`** for the preview and `X-Plane Flight Files` for
 analysis. Metadata `Capture Type` is `Live` or `SDK upload`; the original aircraft,
-airport and flight-type metadata is retained. **Landing mode pauses and resets after 10 seconds; timed mode does not pause.** The console shows the current challenge and analysis upload status; press D for diagnostics. Open the
+airport and flight-type metadata is retained on each analysis file. **Landing mode pauses and resets after 10 seconds; timed mode does not pause.** The console shows the current challenge and analysis upload status; press D for diagnostics. Open the
 `SDK upload` dataset in Insight for analysis. FlyWithLua is not required.
 
 ## Quick start
@@ -71,7 +71,7 @@ uses existing UDP inputs; no extra simulator subscriptions are required.
 The default **LOW** mode sends at most one sample per preview signal per second;
 **HIGH** sends up to ten. Select `--sample-mode low|high` or press **R** in the console
 for the next flight. Local capture and touchdown detection stay at 10 Hz in both
-modes. Each dataset keeps a single selected rate. HTTP batch pacing remains at
+modes. Each flight segment keeps a single selected rate; the shared day preview can contain different rates if you change modes between flights. HTTP batch pacing remains at
 least 1.05 seconds after the previous response; sample rate is not UI refresh rate.
 
 The SDK analysis file and touchdown snapshot prepare a future landing PDF.
@@ -132,20 +132,32 @@ Missing/stale telemetry or a failed reset is logged for manual handling; command
 are not blindly retried. X/Q and early manual resets do not trigger repositioning.
 
 The file uses a **files** datastream, never a realtime dataset. Its import and
-cold-storage verification run independently of live cooling. The console reports
-`FINISHED` only after checking sample counts and time bounds through Trino. A live
-cooling failure does not invalidate this analysis dataset. The small live preview
-still drains and calls `cool()` at its cutoff.
+cold-storage verification run independently of the shared preview. The console reports
+`FINISHED` only after checking sample counts and time bounds through Trino. At the
+live cutoff, the final batch is flushed and the local flight segment is closed;
+the shared dataset stays **LIVE**, including between pilots and after Q. A live
+append failure does not invalidate the separate analysis file. Uncertain live
+batches are not automatically replayed or repaired over the day’s existing data.
 The original file retains exact timestamps; file verification allows up to 128 ns
 of observed importer rounding, with exact per-signal sample counts.
 
 ## Dataset names and generated reviews
 
 Analysis datasets have a clean name: `A320_Landing_Challenge_XXX` or
-`Marple_Acrobatic_XXX`, with **no suffix** in Marple. Realtime previews use the
-same base name with **`.live`**, for example `A320_Landing_Challenge_001.live`.
-The local analysis payload retains its normal `.parquet` extension. These names
-apply to new flights; existing datasets are unchanged.
+`Marple_Acrobatic_XXX`, with **no suffix** in Marple. All flights append to the
+same **`Toulouse Live Fair Day 1`** realtime dataset, retaining its dataset ID
+across flights and service restarts. Select it once in Insight and follow the
+latest time window; its history accumulates throughout the day. It intentionally
+keeps the live player active. Use each separate SDK file for completed-flight analysis.
+
+For another day, launch `python3 start_xplane_service.py --live-name "Toulouse Live Fair Day 2"`.
+Do not manually cool the shared preview during the day: a cooled dataset cannot
+be reused by this recorder. Startup reports an error rather than silently creating
+a replacement ID. The launcher prevents concurrent recorder instances on this Mac;
+use only one producer for a shared preview.
+
+The local analysis payload retains its normal `.parquet` extension. Existing
+datasets are unchanged. Explicit legacy `--landing-mode` retains per-flight live datasets.
 
 Before each **landing challenge**, including the first one, the recorder waits for
 confirmed paused telemetry and opens a macOS pop-up:
@@ -156,8 +168,9 @@ ready, then **unpause manually**. Name-entry and paused setup time are excluded
 from the next flight's recording duration. If the sim is running before name entry,
 the recorder requests pause and waits for confirmation. It never auto-unpauses.
 
-The name is saved as **Participant Name** in the upcoming live dataset, analysis
-dataset, local session manifest and original Parquet metadata. Every landing
+The name is saved as **Participant Name** in the upcoming analysis dataset,
+local session manifest and original Parquet metadata. The shared preview has
+day-level metadata (`Capture Type: Live`), without a single pilot assigned to all flights. Every landing
 challenge starts with a fresh name prompt; the previous pilot is never reused.
 There is **no automatic post-landing name prompt** for the landing challenge.
 

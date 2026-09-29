@@ -14,10 +14,13 @@ def main():
     parser.add_argument("--port", type=int, default=49000)
     parser.add_argument("--landing-mode", action="store_true", help="Use the original continuous landing challenge instead of automatic aircraft routing")
     parser.add_argument("--local-only", action="store_true", help="Console without Marple uploads")
+    parser.add_argument("--live-name", help="Persistent live preview name (default: Toulouse Live Fair Day 1)")
     parser.add_argument("--sample-mode", choices=['low', 'high'], default='low', help="Live samples: low 1 Hz / high 10 Hz")
     parser.add_argument("--include-data", action="store_true", help="Opt in to legacy DATA checkbox capture")
     parser.add_argument("--wait-for-reset", action="store_true", help="Use if the plane has already completed a landing")
     args = parser.parse_args()
+    if args.landing_mode and args.live_name:
+        parser.error("--live-name is supported by the default aircraft-aware console only")
     os.chdir(ROOT)
     output = ROOT / "outputs/xplane"
     output.mkdir(parents=True, exist_ok=True)
@@ -47,6 +50,8 @@ def main():
                    "--host", args.host, "--port", str(args.port)]
         if args.local_only:
             command.append("--local-only")
+        if args.live_name:
+            command += ["--live-name", args.live_name]
     command += ['--sample-mode', args.sample_mode]
     if args.include_data:
         command.append('--include-data')
